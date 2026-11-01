@@ -21,7 +21,7 @@ function eq(a, b, msg) { assert.strictEqual(a, b, `${msg} — 期望 ${b}，实�
 
 /* ---------------- 面板定义 ---------------- */
 
-eq(PANES.length, 5, '五段流水线各一个面板');
+eq(PANES.length, 7, '七个制作阶段各一个面板');
 eq(PANES[0].id, 'outline', '大纲排第一——顺序照流程图');
 eq(PANES.at(-1).id, 'storyboard', '分镜排最后');
 ok(new Set(PANES.map((p) => p.id)).size === PANES.length, '面板 id 不重复');
@@ -115,10 +115,11 @@ const DOC = `<!doctype html><html lang="zh"><head><meta charset="utf-8">
 /* ---------------- scopeHtml ---------------- */
 
 {
-  const h = scopeHtml('<section id="sec-gates"><a href="#sec-gates">去</a><b data-pane="tp-1"></b></section>', 'outline--');
+  const h = scopeHtml('<section id="sec-gates"><a href="#sec-gates">去</a><b data-pane="tp-1"></b><button data-target="p-hero"></button></section>', 'outline--');
   ok(h.includes('id="outline--sec-gates"'), 'id 加前缀');
   ok(h.includes('href="#outline--sec-gates"'), '页内锚点跟着改');
   ok(h.includes('data-pane="outline--tp-1"'), 'data-pane 跟着改——大纲的图表切换靠它跟 id 比对');
+  ok(h.includes('data-target="outline--p-hero"'), 'data-target 跟着改——角色列表切换靠它跟 id 比对');
   // 跨报告重复的 id 实测有 9 个（#ep-1…#ep-6、#sec-gates、#sec-scenes、#sec-rhythm），
   // 不加前缀页内锚点会跳到别的面板去
   eq(scopeHtml('<i id="ep-1"></i>', 'script--'), '<i id="script--ep-1"></i>', '不同面板的同名 id 分得开');
@@ -148,8 +149,9 @@ const DOC = `<!doctype html><html lang="zh"><head><meta charset="utf-8">
   ok(b.includes('src="/abs.png"'), '根路径不动');
 }
 {
-  const b = rebaseAssets('<img data-src="E01-01/f1.png" data-img="E01-01/f1.png">', '/demo/storyboard', '/demo');
+  const b = rebaseAssets('<img data-src="E01-01/f1.png" data-img="E01-01/f1.png" loading="lazy">', '/demo/storyboard', '/demo');
   eq((b.match(/storyboard\/E01-01\/f1\.png/g) ?? []).length, 2, 'data-src 与 data-img 都重算');
+  ok(b.includes('loading="eager"'), 'loading="lazy" 转换为 loading="eager"，保障隐藏 tab 切换瞬显');
 }
 
 /* ---------------- scopeJs ---------------- */

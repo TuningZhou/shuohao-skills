@@ -68,6 +68,17 @@ export const PANES = [
     needs: [],
   },
   {
+    id: 'refs',
+    skill: 'character-refs',
+    flag: '--refs',
+    dir: 'refs',
+    label: '定妆',
+    labelEn: 'Refs',
+    hint: '多视角参考图册',
+    hintEn: 'Multi-view turnarounds',
+    needs: ['--cast'],
+  },
+  {
     id: 'art',
     skill: 'novel-art',
     flag: '--art',
@@ -88,6 +99,17 @@ export const PANES = [
     hint: '场次、节拍、台词',
     hintEn: 'Scenes, beats, lines',
     needs: ['--outline', '--art', '--cast'],
+  },
+  {
+    id: 'staging',
+    skill: 'novel-staging',
+    flag: '--staging',
+    dir: 'staging',
+    label: '站位',
+    labelEn: 'Staging',
+    hint: '开场平面调度',
+    hintEn: 'Blocking & positions',
+    needs: ['--script', '--art', '--outline'],
   },
   {
     id: 'storyboard',
@@ -223,6 +245,7 @@ export function scopeHtml(body, prefix) {
     .replace(/\bid="([^"]+)"/g, (_, id) => `id="${prefix}${id}"`)
     .replace(/\bhref="#([^"]+)"/g, (_, id) => `href="#${prefix}${id}"`)
     .replace(/\bdata-pane="([^"]+)"/g, (_, id) => `data-pane="${prefix}${id}"`)
+    .replace(/\bdata-target="([^"]+)"/g, (_, id) => `data-target="${prefix}${id}"`)
     .replace(/\baria-controls="([^"]+)"/g, (_, id) => `aria-controls="${prefix}${id}"`)
     .replace(/\bfor="([^"]+)"/g, (_, id) => `for="${prefix}${id}"`);
 }
@@ -233,6 +256,10 @@ export function scopeHtml(body, prefix) {
  * 各报告的图相对各自 json 所在目录（角色是 `images/…`，分镜是 `E01-01/f1.png`）。
  * 合成一页之后，浏览器按合并文件的位置解析，不重算就全是断图。
  * `data:` 与绝对地址原样不动。
+ *
+ * 同时将 `loading="lazy"` 转为 `loading="eager"`，避免在分栏/多标签页初始隐藏
+ * (display: none) 下被现代浏览器（尤其是 Safari / WebKit 与部分 Chromium 内核）
+ * 挂起懒加载判定导致切到该面板时不显图的顽疾。
  */
 export function rebaseAssets(text, fromDir, outDir) {
   const fix = (p) => {
@@ -245,7 +272,8 @@ export function rebaseAssets(text, fromDir, outDir) {
     // 内联样式与样式表里的 `url(...)`。角色报告的缩略图就走这条
     // （`style="background-image:url('images/…')"`），只查属性会漏掉它，
     // 表现是缩略图 404 但大图正常——很不好排查，所以两条路都覆盖。
-    .replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/g, (m, q, val) => `url(${q}${fix(val)}${q})`);
+    .replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/g, (m, q, val) => `url(${q}${fix(val)}${q})`)
+    .replace(/\bloading="lazy"/g, 'loading="eager"');
 }
 
 /* ------------------------------------------------------------------ */
@@ -466,6 +494,8 @@ ${body}
     panes.forEach(function(p){p.classList.toggle('rp-on',p.id===id);});
     if(history.replaceState)history.replaceState(null,'','#'+id);
     window.scrollTo(0,0);
+    window.dispatchEvent(new Event('resize'));
+    window.dispatchEvent(new Event('scroll'));
   }
   navs.forEach(function(n){n.addEventListener('click',function(){app.classList.remove('rp-all');show(n.dataset.pane);});});
   // 数字键 1–9 直接切面板
@@ -497,23 +527,25 @@ ${panes.map((p) => (p.js ? `<script>\n${p.js}\n</script>` : '')).filter(Boolean)
 /* CLI                                                                 */
 /* ------------------------------------------------------------------ */
 
-const USAGE = `report.mjs —— 把 novel 系列各 skill 的报告合成一张单页
+const USAGE = `report.mjs —— 把影视短剧各 skill 的报告合成一张单页
 
   node scripts/report.mjs --from <demo目录> [--out report.html] [--lang zh|en]
   node scripts/report.mjs --outline o.json --cast c.json … [--out report.html]
 
   --from <目录>      按端到端 demo 工作目录约定自动发现：
-                     outline/ characters/ art/ script/ storyboard/ 各取一份 json
+                     outline/ characters/ refs/ art/ script/ staging/ storyboard/ 各取一份 json
   --outline <f>      单独指定某一段的 json，可与 --from 混用（显式的优先）
   --cast <f>
+  --refs <f...>      角色定妆资产 asset.json，或存有各角色 asset.json 的目录
   --art <f>
   --script <f>
+  --staging <f>
   --storyboard <f>
   --out <f>          输出路径，默认 report.html
   --lang zh|en       外壳与各报告的界面语言，默认 zh
   --title <s>        左上角标题，默认取第一份 json 的 source
 
-  **给了哪几段就出哪几个面板**——只有角色就只有一个面板，五段齐全就是五个。
+  **给了哪几段就出哪几个面板**——只有角色就只有一个面板，七段齐全就是七个。
   各 skill 的 render 一行不改，仍然可以单独出各自的报告。`;
 
 function flag(argv, name, fallback = null) {
@@ -521,9 +553,24 @@ function flag(argv, name, fallback = null) {
   return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : fallback;
 }
 
-/** 在一个目录里找唯一一份看着像该段产出的 json（排掉报告与清单类文件）。 */
+/** 在一个目录里找该段产出的 json（排掉报告与清单类文件）。 */
 function findJson(dir, skill) {
   if (!existsSync(dir)) return null;
+  if (skill === 'character-refs') {
+    const assets = [];
+    if (existsSync(join(dir, 'asset.json'))) assets.push(join(dir, 'asset.json'));
+    const entries = readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        const subAsset = join(dir, entry.name, 'asset.json');
+        if (existsSync(subAsset)) assets.push(subAsset);
+      } else if (entry.name.endsWith('-asset.json') || entry.name === 'asset.json') {
+        const full = join(dir, entry.name);
+        if (!assets.includes(full)) assets.push(full);
+      }
+    }
+    return assets.length ? assets : null;
+  }
   const kind = skill.replace('novel-', '');
   const stem = kind === 'characters' ? 'cast' : kind;
   const files = readdirSync(dir)
@@ -556,16 +603,28 @@ function main(argv) {
   for (const p of chosen) {
     const jsonPath = paths[p.flag];
     const cli = join(skillsDir, p.skill, 'scripts', `${p.skill}.mjs`);
-    const args = ['render', jsonPath, '--html', '--lang', lang];
+    let args;
+    let fromDir;
+    let cwd;
+    if (p.skill === 'character-refs') {
+      const assetFiles = Array.isArray(jsonPath) ? jsonPath : [jsonPath];
+      args = ['render', ...assetFiles, '--lang', lang];
+      fromDir = from ? resolve(from, p.dir) : dirname(assetFiles[0]);
+      cwd = outDir;
+    } else {
+      args = ['render', jsonPath, '--html', '--lang', lang];
+      fromDir = dirname(jsonPath);
+      cwd = dirname(jsonPath);
+    }
     for (const need of p.needs) {
       // 上游有就带上；没有就不带，各 skill 自己会说明跳过了什么
-      if (paths[need]) args.push(need, paths[need]);
+      if (paths[need] && typeof paths[need] === 'string') args.push(need, paths[need]);
     }
     let html;
     try {
       // cwd 定在 json 所在目录：各 skill 的图存在检查是相对那里做的
       html = execFileSync(process.execPath, [cli, ...args], {
-        cwd: dirname(jsonPath),
+        cwd,
         encoding: 'utf8',
         maxBuffer: 64 * 1024 * 1024,
         env: { ...process.env, NODE_OPTIONS: '' },
@@ -575,7 +634,7 @@ function main(argv) {
       console.error(`⚠️ ${p.skill} 这一段没渲染出来，跳过：${why}`);
       continue;
     }
-    const pane = makePane(html, { id: p.id, fromDir: dirname(jsonPath), outDir });
+    const pane = makePane(html, { id: p.id, fromDir, outDir });
     pane.meta = p;
     panes.push(pane);
   }
@@ -585,11 +644,12 @@ function main(argv) {
   const titleFlag = flag(argv, '--title');
   let title = titleFlag;
   if (!title) {
-    const first = paths[chosen[0].flag];
+    const rawFirst = paths[chosen[0].flag];
+    const first = Array.isArray(rawFirst) ? rawFirst[0] : rawFirst;
     try {
       title = JSON.parse(readFileSync(first, 'utf8')).source ?? '';
     } catch { /* 读不出来就退回文件名 */ }
-    if (!title) title = basename(first).replace(/[-_](cast|outline|art|script|storyboard)\.json$/i, '').replace(/\.json$/i, '');
+    if (!title) title = basename(first).replace(/[-_](cast|outline|art|script|storyboard|staging|asset)\.json$/i, '').replace(/\.json$/i, '');
   }
 
   const sub = panes.map((p) => (lang === 'en' ? p.meta.labelEn : p.meta.label)).join(lang === 'en' ? ' · ' : ' · ');

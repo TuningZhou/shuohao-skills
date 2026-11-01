@@ -34,22 +34,23 @@
 
 **面向各类 Agent 的 AI 短剧制作 skill 集合**：从一本小说到直接交给生成管线的制作素材——排大纲、拆角色、出场景与道具设定、写剧本、排开场站位、切分镜。每个 skill 都是自包含目录，任何能够读取 `SKILL.md` 并执行随附脚本的 Agent 都可以使用；Claude Code 和 Codex 只是其中两个运行示例，并非使用前提。
 
-仓库目前有 **7 个 skill：6 个制作阶段，加上可独立使用的角色参考图生成**。改编大纲收敛结构，角色、美术、剧本同步迭代；开场站位在分镜之前确定每场人物的位置。
+仓库目前有 **7 个 skill**，按现代电影工业（Pre-production）的 4 个规范阶段推进：文学策划（大纲、剧本）、视觉资产定版（角色设定、**角色定妆多视角详解**、场景与道具）、视听预演调度（开场站位、分镜台本与镜头首帧），以及工业投产包导出。
 
 ```mermaid
 flowchart TD
     novel[小说原文] --> outline[novel-outline · 改编大纲]
-    outline --> characters[novel-characters · 角色设定]
-    outline --> art[novel-art · 美术设定]
     outline --> script[novel-script · 剧本]
+    outline --> characters[novel-characters · 角色设定]
+    characters -->|export-intake| refs[character-refs · 角色参考图与定妆照]
+    outline --> art[novel-art · 美术设定]
     characters <--> art
     art <--> script
     script <--> characters
-    characters -. 角色设定 .-> refs[character-refs · 角色参考图]
-    art --> staging[novel-staging · 开场站位]
-    script --> staging
+    script --> staging[novel-staging · 开场站位]
+    art --> staging
     staging -->|复制开场走位句| storyboard[novel-storyboard · 分镜]
-    refs -. 参考图片 .-> storyboard
+    refs -->|注入正面/侧面/背面参考图| storyboard
+    art -->|注入场景与道具设定图| storyboard
     storyboard --> production[视频投产包]
 ```
 
@@ -94,28 +95,28 @@ node skills/novel-staging/scripts/novel-staging.mjs blocking skills/novel-stagin
 
 **分镜目前不会自动读取 `staging.json`。**需要把确认后的开场走位句交给 Agent，要求复制到对应场景第一段的 `blocking`。这一阶段输出站位数据与报告，不生成图片或视频。新建站位方案的完整步骤见 [skill 使用说明](skills/novel-staging)。
 
-## 合成五个阶段的报告
+## 合成七个阶段的影视制片报告
 
-合成器目前支持**大纲、角色、美术、剧本、分镜**，尚未包含站位报告和 character-refs 图册。这五个阶段的报告可以合成一张单页，左侧导航切换——**支持的阶段中，有哪几个就出哪几个面板**：
+合成器支持**大纲、角色、定妆图册、美术、剧本、站位、分镜**全部七个制作阶段。这些阶段的报告可以合成一张单页，左侧导航切换——**支持的阶段中，有哪几个就出哪几个面板**：
 
 ```bash
 node scripts/report.mjs --from <demo目录> --out report.html
 ```
 
-`--from` 按下面的[工作目录约定](#端到端-demo-工作目录约定)自动发现五份 json；也可以逐个指定（`--outline` `--cast` `--art` `--script` `--storyboard`）。只跑了角色那一段就只有一个面板，不报错。
+`--from` 按下面的[工作目录约定](#端到端-demo-工作目录约定)自动发现七份 json/asset（`outline/`、`characters/`、`refs/`、`art/`、`script/`、`staging/`、`storyboard/`）；也可以逐个指定（`--outline` `--cast` `--refs` `--art` `--script` `--staging` `--storyboard`）。只跑了某一段就只有对应面板，不报错。
 
-它是**组装器，不是独立 skill**：不 import 任何 skill 的代码，而是调各自的 `render --html` 拿产物再拼装。所以五个 skill 一行不改、各自仍然独立可跑、可以单独拷走；某个 skill 改了渲染，这边自动跟上。
+它是**组装器，不是独立 skill**：不 import 任何 skill 的代码，而是调各自的 `render` 拿产物再拼装。所以各 skill 一行不改、各自仍然独立可跑、可以单独拷走；某个 skill 改了渲染，这边自动跟上。
 
 合并时处理三件事——**这三件都在组装器里做，不侵入 skill**：
 
-- **样式串味**。五份报告共用 57 个类名，其中 13 个同名不同定义（`.copy` `.kpis` `.badge` `.chip`……），所以给每份样式的每条选择器加作用域前缀
-- **脚本串味**。各报告的脚本都是 `document.querySelector('.expo')` 这种全局查询，合成一页后只会命中第一个——五个导出按钮会全废。做法是给每份脚本套一层作用域代理
-- **图片路径**。各报告的图相对自己那份 json 的目录（`images/…`、`E01-01/f1.png`），合成后按输出文件的位置重算
+- **样式串味**。多份报告共用类名，给每份样式的每条选择器加作用域前缀
+- **脚本串味**。各报告脚本的查询套上一层作用域代理，避免全局冲突
+- **图片路径**。各报告的图相对自己所在目录，合成后按输出文件的位置重算，并将 `loading="lazy"` 转为 `loading="eager"` 确保切换标签瞬显
 
-默认一次显示一个面板（五份加起来将近六十万字符）。左下角「平铺全部」把所有面板同时展开，Cmd+F 恢复全局搜索。数字键 `1`–`5` 切面板，`#pane-script` 这样的深链可以直接分享到某一屏。
+默认一次显示一个面板。左下角「平铺全部」把所有面板同时展开，Cmd+F 恢复全局搜索。数字键 `1`–`7` 切面板，`#pane-script` 这样的深链可以直接分享到某一屏。
 
 ```bash
-node scripts/report-selftest.mjs   # 92 项断言，不起浏览器
+node scripts/report-selftest.mjs   # 98 项断言，不起浏览器
 ```
 
 六个制作阶段的报告预览：

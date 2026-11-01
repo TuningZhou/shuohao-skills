@@ -26,6 +26,8 @@ import {
   strings,
   uiTemplate,
   validateCast,
+  characterToIntake,
+  parseAge,
 } from './novel-characters.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -839,5 +841,18 @@ ok(/data-src="images\/x-sheet\.png"/.test(sheetHtml), '弹层拿到图片地址'
 ok(/class="copy-img" data-img="images\/x-sheet\.png"/.test(sheetHtml), '图上有复制按钮');
 ok(sheetHtml.includes('ClipboardItem'), '复制的是图片本身而不是路径');
 ok(/blob\.type !== 'image\/png'/.test(sheetHtml), '非 PNG 先转码——Safari 只认 image/png');
+
+/* ---------------- export-intake (character-refs 桥接) ---------------- */
+eq(parseAge('二十五岁'), 25, '中文年龄二十五岁解析为 25');
+eq(parseAge('17岁'), 17, '阿拉伯数字年龄解析为 17');
+eq(parseAge('四十四岁'), 44, '中文年龄四十四岁解析为 44');
+eq(parseAge('六十二岁'), 62, '中文年龄六十二岁解析为 62');
+
+const intake = characterToIntake(CAST[0], '测试故事', 'zh');
+eq(intake.name, CAST[0].name, 'intake 角色名一致');
+eq(intake.identity.age, parseAge(CAST[0].persona.ageRange), 'intake 年龄正确');
+ok(intake.identity.en && !/[\u4e00-\u9fa5]/.test(intake.identity.en), 'intake 英文不含中文');
+ok(intake.outfit.top.en && intake.outfit.bottom.en, 'intake 上下装英文齐全');
+eq(intake.outfit.details.length, 4, 'intake 包含 4 个细节槽位');
 
 console.log(`✓ ${passed} 项自测全部通过`);

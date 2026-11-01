@@ -4,7 +4,7 @@
 // without an npm install. Node 18+ (stdlib only).
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { basename, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /* ------------------------------------------------------------------ */
@@ -1607,6 +1607,9 @@ const USAGE = `novel-characters.mjs — novel-characters skill 的确定性工�
         [--order merged.json]      同档角色的戏份顺序（默认自动找 <workdir>/merged.json）
   validate <cast.json> <book.txt>  校验；有违规逐条打印并 exit 1
   render <cast.json> [--html|--md] 渲染报告到 stdout（默认 --md）
+  export-intake <cast.json>        从角色表导出 character-refs 需要的 intake.json 骨架
+        [--outdir <dir>]           输出目录（默认 ../refs-intake）
+        [--lang zh|en]             语言代码，默认取 cast.json
   slug <name>                      角色名转安全文件名
   ui-template [lang]               打印界面文案骨架，供翻译成内置表没有的语言
 
@@ -1640,6 +1643,144 @@ function loadCast(path) {
     summary: Array.isArray(raw) ? '' : (raw.summary ?? ''),
     lang: Array.isArray(raw) ? DEFAULT_LANG : (raw.lang ?? DEFAULT_LANG),
     ui: Array.isArray(raw) ? null : (raw.ui ?? null),
+  };
+}
+
+export function parseAge(s) {
+  if (typeof s === 'number') return Math.max(1, Math.min(110, Math.round(s)));
+  const str = String(s ?? '').trim();
+  const digitMatch = str.match(/\d+/);
+  if (digitMatch) return parseInt(digitMatch[0], 10);
+  const CN = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  let num = 0;
+  if (str.includes('百')) return 100;
+  const parts = str.replace(/岁/g, '').split('十');
+  if (parts.length === 1) {
+    num = CN[parts[0]] ?? 25;
+  } else {
+    const tens = parts[0] === '' ? 1 : (CN[parts[0]] ?? 1);
+    const ones = CN[parts[1]] ?? 0;
+    num = tens * 10 + ones;
+  }
+  return num > 0 && num <= 110 ? num : 25;
+}
+
+export function cleanIntakeEnglish(s, characterName = '') {
+  let res = String(s ?? '')
+    .replace(/[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]/g, '')
+    .replace(/\b(photo-?realistic|hyper-?realistic|anime|manga|cartoon|illustration|3d render|oil painting|watercolou?r|ghibli|cinematic|film still)\b/gi, '')
+    .replace(/\((inferred|stated|default|推断|原话|默认)\)/gi, '')
+    .replace(/\b(close-?up|zoom|macro|extreme)\b/gi, '')
+    .trim();
+  if (characterName) {
+    res = res.split(characterName).join('').trim();
+  }
+  return res.replace(/\s{2,}/g, ' ').replace(/^[,\s.-]+|[,\s.-]+$/g, '');
+}
+
+export function characterToIntake(c, source = '', lang = 'zh') {
+  const age = parseAge(c.persona?.ageRange);
+  const isMale = c.persona?.gender === '男';
+  const gender = isMale ? 'male' : 'female';
+  const name = c.name;
+
+  const identityText = `${c.persona?.ageRange || `${age}岁`}，${c.persona?.gender || (isMale ? '男' : '女')}，${c.persona?.identity || c.oneLiner || '角色'}`;
+  let identityEn = cleanIntakeEnglish(
+    `A ${age}-year-old East Asian ${gender}, ${c.persona?.identity || c.oneLiner || 'character'}`,
+    name,
+  );
+  if (!identityEn) identityEn = `A ${age}-year-old East Asian ${gender}`;
+
+  const faceText = c.persona?.appearance?.match(/[^。；]*?(?:脸|眉|眼|鼻|唇|神情|面容|眸)[^。；]*/)?.[0] || '神情清冷坚忍，眉眼修长，面容俊秀';
+  let faceEn = cleanIntakeEnglish(
+    c.image?.prompt?.match(/[^,.]*?(?:expression|eyes|eyebrows|cheekbones|face|lips|jawline)[^,.]*/i)?.[0] ||
+    'Ascetic and resolute expression, cool dark piercing eyes, fine natural facial features',
+    name,
+  );
+  if (!faceEn) faceEn = 'Cool piercing eyes, natural fine skin texture, resolute facial features';
+
+  const hairText = c.persona?.appearance?.match(/[^。；]*?(?:发|髻|辫|发冠|发簪)[^。；]*/)?.[0] || '长发束髻，几缕碎发垂在耳际';
+  let hairEn = cleanIntakeEnglish(
+    c.image?.prompt?.match(/[^,.]*?(?:hair|topknot|braids?|bun|hairpin|strands?)[^,.]*/i)?.[0] ||
+    'Neat traditional hair bound up in a topknot, subtle loose strands at temples',
+    name,
+  );
+  if (!hairEn) hairEn = 'Neat traditional dark hair tied up, subtle loose strands';
+
+  const topText = c.persona?.appearance?.match(/[^。；]*?(?:身着|身穿|穿|袍|衣|甲|衫|褂)[^。；]*/)?.[0] || '身着传统质朴长袍道装，前臂布带绑手';
+  let topEn = cleanIntakeEnglish(
+    c.image?.prompt?.match(/[^,.]*?(?:robe|tunic|shirt|jacket|collar|sash|wraps?)[^,.]*/i)?.[0] ||
+    'A weathered traditional coarse cotton robe with subtle trim at collar, cloth wraps around forearms',
+    name,
+  );
+  if (!topEn) topEn = 'A weathered traditional coarse cotton robe, cloth wraps around forearms';
+
+  const bottomText = '同色下袍长裤，素色布带绑腿与软底行脚布鞋';
+  const bottomEn = cleanIntakeEnglish('matching traditional long robe hem and trousers, travel leg wraps and soft cloth shoes', name);
+
+  const details = [
+    {
+      slot: 'hair',
+      en: cleanIntakeEnglish('the simple traditional hairpin securing the hair bun', name),
+      text: '束发用的素朴发簪',
+      source: 'stated',
+    },
+    {
+      slot: 'neck',
+      en: cleanIntakeEnglish('the neat collar and fabric trim of the traditional robe', name),
+      text: '长袍领口与领缘包边',
+      source: 'stated',
+    },
+    {
+      slot: 'sleeve',
+      en: cleanIntakeEnglish('the durable fabric wrist wraps and cloth cuffs', name),
+      text: '护腕布裹与袖口边缘',
+      source: 'stated',
+    },
+    {
+      slot: 'feet',
+      en: cleanIntakeEnglish('traditional soft cotton traveling shoes and ankle cloth ties', name),
+      text: '传统行脚布鞋配绑腿布扣',
+      source: 'inferred',
+    },
+  ];
+
+  return {
+    name,
+    lang,
+    source,
+    identity: {
+      age,
+      gender,
+      en: identityEn,
+      text: identityText,
+      source: 'stated',
+    },
+    face: {
+      en: faceEn,
+      text: faceText,
+      source: 'stated',
+    },
+    hair: {
+      en: hairEn,
+      text: hairText,
+      source: 'stated',
+    },
+    outfit: {
+      id: 'default',
+      label: '常态',
+      top: {
+        en: topEn,
+        text: topText,
+        source: 'stated',
+      },
+      bottom: {
+        en: bottomEn,
+        text: bottomText,
+        source: 'inferred',
+      },
+      details,
+    },
   };
 }
 
@@ -1833,6 +1974,28 @@ function main(argv) {
         ? renderHtml(characters, title, summary, lang, ui)
         : renderMarkdown(characters, title, summary, lang, ui)) + '\n',
     );
+    return;
+  }
+
+  if (cmd === 'export-intake') {
+    const [castPath] = rest;
+    if (!castPath || castPath.startsWith('--')) {
+      throw new Error('用法：export-intake <cast.json> [--outdir <目录>] [--lang zh|en]');
+    }
+    const { characters, source, lang: castLang } = loadCast(castPath);
+    const lang = flag(rest, '--lang', castLang ?? DEFAULT_LANG);
+    const outDir = resolve(flag(rest, '--outdir', join(dirname(resolve(castPath)), '../refs-intake')));
+    mkdirSync(outDir, { recursive: true });
+    const files = [];
+    for (const c of characters) {
+      const intake = characterToIntake(c, source, lang);
+      const filePath = join(outDir, `${slug(c.name)}-intake.json`);
+      writeFileSync(filePath, JSON.stringify(intake, null, 2) + '\n', 'utf8');
+      files.push(filePath);
+    }
+    console.log(`✓ 导出 ${files.length} 个角色 intake 文件到 ${relative(process.cwd(), outDir) || outDir}`);
+    for (const f of files) console.log(`    ${basename(f)}`);
+    console.log(`\n下一步（character-refs）：\n  node skills/character-refs/scripts/character-refs.mjs new <intake.json> --out refs/`);
     return;
   }
 

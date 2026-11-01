@@ -2043,11 +2043,28 @@ function main(argv) {
         }
       }
     }
-    // Seedance 参考图路径要挂设定图：从 --images 指定的目录找，找到就拷进包里
+    // Seedance 参考图路径挂设定图或 character-refs 定妆图：优先从 --images、--refs 找，找到就拷进包里
     const sheetsDir = resolve(flag(rest, '--images', 'images'));
+    const refsFlag = flag(rest, '--refs');
+    const refsDir = refsFlag ? resolve(refsFlag) : resolve('refs');
+    const findSheet = (file) => {
+      if (existsSync(join(sheetsDir, file))) return join(sheetsDir, file);
+      if (existsSync(join(refsDir, file))) return join(refsDir, file);
+      const nameMatch = file.match(/^(.+)-sheet\.png$/);
+      if (nameMatch) {
+        const base = nameMatch[1];
+        const v1 = join(refsDir, base, 'default', 'front-full.v1.png');
+        if (existsSync(v1)) return v1;
+        const v = join(refsDir, base, 'default', 'front-full.png');
+        if (existsSync(v)) return v;
+        const ff = join(refsDir, `${base}-front-full.png`);
+        if (existsSync(ff)) return ff;
+      }
+      return null;
+    };
     const pack = exportPack(board, ctx.script, {
       imageExists: (rel) => existsSync(resolve(rel)),
-      sheetExists: (file) => existsSync(join(sheetsDir, file)),
+      sheetExists: (file) => !!findSheet(file),
       dir,
       protocol,
       names: namer(ctx),
@@ -2057,7 +2074,10 @@ function main(argv) {
       mkdirSync(resolve(f.path, '..'), { recursive: true });
       writeFileSync(resolve(f.path), f.content, 'utf8');
     }
-    for (const c of pack.copies) copyFileSync(join(sheetsDir, c.file), resolve(c.to));
+    for (const c of pack.copies) {
+      const src = findSheet(c.file);
+      if (src) copyFileSync(src, resolve(c.to));
+    }
     const segN = pack.manifest.length;
     if (protocol === 'seedance') {
       console.log(`✓ ${segN} 段 Seedance 投产包 → ${resolve(dir)}/（每段一个文件夹：seedance.md + 附件；根部 seedance-manifest.json）`);

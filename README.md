@@ -41,22 +41,23 @@ English | [中文](README.zh.md) | [X @eternityspring](https://x.com/eternityspr
 
 **Agent-agnostic skills for AI short-drama production** — from a novel to shoot-ready material: character bibles, adaptation outlines, scene & prop bibles, screenplays, opening staging, and storyboards. Each skill is self-contained and works with any Agent that can read `SKILL.md` and run the bundled scripts; Claude Code and Codex are two supported examples, not requirements.
 
-The repository now contains **seven skills: six production stages plus standalone character reference generation**. The outline settles the adaptation; characters, art, and screenplay iterate together; staging fixes each scene's opening positions before storyboarding.
+The repository contains **seven skills**, structured across the four standard stages of film pre-production: literary development (outline, screenplay), visual asset locking (character bibles, **character multi-view turnaround sheets**, scene & prop bibles), audiovisual pre-production & staging (opening staging, storyboards with keyframes), and production pack exporting.
 
 ```mermaid
 flowchart TD
     novel[Source novel] --> outline[novel-outline]
-    outline --> characters[novel-characters]
-    outline --> art[novel-art]
     outline --> script[novel-script]
+    outline --> characters[novel-characters]
+    characters -->|export-intake| refs[character-refs]
+    outline --> art[novel-art]
     characters <--> art
     art <--> script
     script <--> characters
-    characters -. Character designs .-> refs[character-refs]
-    art --> staging[novel-staging]
-    script --> staging
+    script --> staging[novel-staging]
+    art --> staging
     staging -->|Copy opening blocking| storyboard[novel-storyboard]
-    refs -. Reference images .-> storyboard
+    refs -->|Inject multi-view turnarounds| storyboard
+    art -->|Inject scene & prop sheets| storyboard
     storyboard --> production[Video production packs]
 ```
 
@@ -93,28 +94,28 @@ node skills/novel-staging/scripts/novel-staging.mjs blocking skills/novel-stagin
 
 **The storyboard does not automatically import `staging.json` yet.** Give the Agent the accepted opening blocking sentences and ask it to copy each one into the first segment of its scene. This stage outputs staging data and reports; it does not generate images or video. See the [skill guide](skills/novel-staging/README.en.md) for authoring a new staging plan.
 
-## One page for five stage reports
+## One page for seven stage reports
 
-The assembler currently supports **outline, characters, art, screenplay, and storyboard**. It does not include the staging report or character-refs gallery. These five supported reports can be merged into a single page with a left-hand nav — **you get a pane for every supported stage you actually have**:
+The assembler supports all seven stages: **outline, characters, character refs, art, screenplay, staging, and storyboard**. These supported reports can be merged into a single page with a left-hand nav — **you get a pane for every stage you actually have**:
 
 ```bash
 node scripts/report.mjs --from <demo-dir> --out report.html
 ```
 
-`--from` discovers the five json files using the [working-directory convention](#repository-conventions); you can also point at each one directly (`--outline` `--cast` `--art` `--script` `--storyboard`). Ran only the character pass? You get one pane, no error.
+`--from` discovers the seven json/asset sets using the [working-directory convention](#repository-conventions); you can also point at each one directly (`--outline` `--cast` `--refs` `--art` `--script` `--staging` `--storyboard`). Ran only the character pass? You get one pane, no error.
 
-It is an **assembler, not a separate skill**: it imports no skill code, it shells out to each skill's own `render --html` and stitches the results. So the five skills stay untouched, still run standalone, and are still copyable on their own — and when a skill changes its rendering, this picks it up for free.
+It is an **assembler, not a separate skill**: it imports no skill code, it shells out to each skill's own `render` and stitches the results. So the skills stay untouched, still run standalone, and are still copyable on their own — and when a skill changes its rendering, this picks it up for free.
 
 Merging solves three problems, **all of them inside the assembler, none inside the skills**:
 
-- **Style bleed.** The five reports share 57 class names, 13 of which mean different things in different reports (`.copy`, `.kpis`, `.badge`, `.chip`…), so every selector gets a scope prefix
-- **Script bleed.** Each report's script does document-wide lookups like `document.querySelector('.expo')`. Merged, that only ever finds the first one — all five export buttons would break. Each script gets wrapped in a scoping proxy
-- **Asset paths.** Each report's images are relative to its own json directory (`images/…`, `E01-01/f1.png`) and get rebased against the output file
+- **Style bleed.** Reports share class names, so every selector gets a scope prefix
+- **Script bleed.** Each report's query selectors are wrapped in a scoping proxy
+- **Asset paths.** Images relative to their own directories get rebased against the output file, with `loading="lazy"` upgraded to `loading="eager"` for instant tab switching
 
-One pane shows at a time by default (the five together run to roughly 600k characters). "Show all" in the bottom-left expands every pane so Cmd+F reaches the whole document. Number keys `1`–`5` switch panes, and `#pane-script` deep-links straight to one.
+One pane shows at a time by default. "Show all" in the bottom-left expands every pane so Cmd+F reaches the whole document. Number keys `1`–`7` switch panes, and `#pane-script` deep-links straight to one.
 
 ```bash
-node scripts/report-selftest.mjs   # 92 assertions, no browser needed
+node scripts/report-selftest.mjs   # 98 assertions, no browser needed
 ```
 
 Reports from the six production stages:
