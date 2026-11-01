@@ -7,7 +7,7 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ANCHOR, DEFAULT_LOOK, DEFAULT_TIER, DETAIL_SLOTS, SOURCES, VIEWS, allViews, anchorUsable, assetFromIntake, buildPrompt, confirmTable, current,
-  human, intakeProblems, padDisplay, recordVersion, resolveLayers, resolveRefs, skinBand, staleCodes, staleReasons, staleText, viewsOfTier,
+  human, intakeProblems, padDisplay, recordVersion, resolveLayers, resolveRefs, selectVersion, skinBand, staleCodes, staleReasons, staleText, viewsOfTier,
 } from './core.mjs';
 import { BUILTIN, fmt, uiFor, uiTemplate } from './i18n.mjs';
 import { DEFAULT_LOOK_ID, LOOKS, findLook, lookName, lookProblems, lookSnapshot } from './looks.mjs';
@@ -95,7 +95,13 @@ async function genViews(assetPath, viewIds, opts) {
     }
     const pr = buildPrompt(asset, oid, view, outfit.look);
     const { refs, notes } = isAnchor ? { refs: [], notes: [] } : resolveRefs(asset, oid, pr);
-    const seed = modelKind(model) === 'codex' ? null : (opts.seed ?? Math.floor(Math.random() * 2 ** 31));
+    if (opts.reason) notes.push(`重出原因：${opts.reason}`);
+    if (opts.patch) {
+      const pText = String(opts.patch).trim().replace(/\.?$/, '.');
+      pr.text = `${pr.text} Variant modification: ${pText}`;
+      notes.push(`变体微调：${opts.patch.trim()}`);
+    }
+    const seed = ['codex', 'antigravity'].includes(modelKind(model)) ? null : (opts.seed ?? Math.floor(Math.random() * 2 ** 31));
     const t0 = Date.now();
     let buf;
     try {
@@ -108,7 +114,7 @@ async function genViews(assetPath, viewIds, opts) {
     const flat = flattenAlpha(buf);
     if (flat.changed) { buf = flat.buf; notes.push('模型给的是透明背景，已铺成白底'); }
     const { version, buf: out } = recordVersion(asset, oid, view, {
-      buf, model, seed, prompt: pr, refs, notes, confirmMode: cfg.confirmAnchor && !opts.noConfirm ? 'wait' : 'auto',
+      buf, model, seed, prompt: pr, patch: opts.patch, refs, notes, confirmMode: cfg.confirmAnchor && !opts.noConfirm ? 'wait' : 'auto',
     });
     mkdirSync(join(dir, oid), { recursive: true });
     writeFileSync(join(dir, version.file), out);
@@ -161,10 +167,34 @@ function outfitSection(asset, oid, assetDir, outDir, ui) {
     const cur = current(outfit, view);
     return cur ? rel(outDir, join(assetDir, cur.file)) : null;
   };
+  const gateLabel = (g, spec) => (g.id === 'white' ? (spec?.kind === 'face' ? ui.gates.whiteFace : spec?.kind === 'full' ? ui.gates.whiteFull : ui.gates.white)
+    : fmt(ui.gates[g.id] ?? g.label, { x: spec?.ratio }));
+  const versionsData = (view) => {
+    const rawVersions = outfit.views[view]?.versions || (current(outfit, view) ? [current(outfit, view)] : []);
+    const spec = V[view] || {};
+    return rawVersions.map((ver) => ({
+      v: ver.v,
+      src: rel(outDir, join(assetDir, ver.file)),
+      model: ver.model || '',
+      seed: ver.seed ?? '',
+      patch: ver.patch || '',
+      createdAt: ver.createdAt || '',
+      gatesOk: !(ver.gates || []).some((g) => !g.ok),
+      gatesText: (ver.gates || []).map((g) => `${g.ok ? '✓' : '✗'} ${gateLabel(g, spec)}${g.detail ? ` (${g.detail})` : ''}`).join('; '),
+      isCurrent: ver.v === (outfit.views[view]?.current ?? 1),
+    }));
+  };
   const img = (view, cls = 'img') => {
     const s = src(view);
     const why = s ? staleCodes(asset, oid, view).map((c) => staleText(c, ui)) : [];
-    return s ? `<img class="${cls}${why.length ? ' stale' : ''}" src="${esc(s)}" alt="${esc(label(view))}"${why.length ? ` title="${esc(`${ui.stStale}：${why.join('; ')}`)}"` : ''} loading="lazy">`
+    const vers = versionsData(view);
+    const cur = current(outfit, view);
+    const assetRel = rel(outDir, join(assetDir, 'asset.json'));
+    const title = `${asset.name} · ${outfit.label} · ${label(view)}`;
+    const abAttrs = s
+      ? ` data-ab-type="refs" data-ab-title="${esc(title)}" data-ab-asset="${esc(assetRel)}" data-ab-view="${esc(view)}" data-ab-outfit="${esc(oid)}" data-ab-current="${cur ? cur.v : 1}" data-ab-versions="${esc(JSON.stringify(vers))}"`
+      : '';
+    return s ? `<img class="${cls}${why.length ? ' stale' : ''}" src="${esc(s)}" alt="${esc(label(view))}"${why.length ? ` title="${esc(`${ui.stStale}：${why.join('; ')}`)}"` : ''}${abAttrs} loading="lazy">`
       : `<div class="${cls} miss">${esc(fmt(ui.notGenerated, { n: V[view]?.tier ?? '?' }))}</div>`;
   };
   const anchor = current(outfit, ANCHOR);
@@ -180,15 +210,19 @@ function outfitSection(asset, oid, assetDir, outDir, ui) {
   const rows = [[F.identity, L.identity, idLine], [F.face, L.face], [F.hair, L.hair], ...(L.build ? [[F.build, L.build]] : []), [F.top, L.top], [F.bottom, L.bottom],
     [F.skin, L.skin], [F.backCue, L.backCue], ...L.details.map((d) => [fmt(F.detail, { x: d.slot === 'custom' ? d.id : ui.slots[d.slot] }), d])];
   const desc = `<details class="desc"><summary>${esc(ui.descSummary)}</summary><dl>${rows.map(([k, f, t]) => `<dt>${esc(k)}</dt><dd>${esc(t ?? text(f))}${tag(f)}</dd>`).join('')}</dl></details>`;
-  const gateLabel = (g, spec) => (g.id === 'white' ? (spec.kind === 'face' ? ui.gates.whiteFace : spec.kind === 'full' ? ui.gates.whiteFull : ui.gates.white)
-    : fmt(ui.gates[g.id] ?? g.label, { x: spec.ratio }));
   const table = Object.entries(V).map(([view, spec]) => {
     const cur = current(outfit, view);
     const stale = cur ? staleCodes(asset, oid, view) : [];
     const bad = (cur?.gates ?? []).filter((g) => !g.ok);
     const state = !cur ? `<span class="dim">${esc(ui.stNone)}</span>` : stale.length ? `<span class="bad">${esc(ui.stStale)}</span> ${esc(stale.map((c) => staleText(c, ui)).join('; '))}`
       : bad.length ? `<span class="bad">${esc(ui.stGate)}</span> ${esc(bad.map((g) => gateLabel(g, spec)).join('; '))}` : '<span class="ok">✓</span>';
-    return `<tr><td>${esc(label(view))}${spec.tested === false ? ` <span class="src">${esc(ui.untested)}</span>` : ''}</td><td>${spec.tier}</td><td>${cur ? `v${cur.v}` : ''}</td><td>${esc(cur?.model ?? '')}</td><td>${esc(cur?.seed ?? '')}</td><td class="mono">${esc(cur?.id ?? '')}</td><td>${state}</td></tr>`;
+    const vers = versionsData(view);
+    const assetRel = rel(outDir, join(assetDir, 'asset.json'));
+    const title = `${asset.name} · ${outfit.label} · ${label(view)}`;
+    const abBtn = cur && vers.length > 1
+      ? ` <button class="rp-ab-open mini" type="button" data-ab-type="refs" data-ab-title="${esc(title)}" data-ab-asset="${esc(assetRel)}" data-ab-view="${esc(view)}" data-ab-outfit="${esc(oid)}" data-ab-current="${cur.v}" data-ab-versions="${esc(JSON.stringify(vers))}">变体(${vers.length})</button>`
+      : '';
+    return `<tr><td>${esc(label(view))}${spec.tested === false ? ` <span class="src">${esc(ui.untested)}</span>` : ''}</td><td>${spec.tier}</td><td>${cur ? `v${cur.v}` : ''}${abBtn}</td><td>${esc(cur?.model ?? '')}</td><td>${esc(cur?.seed ?? '')}</td><td class="mono">${esc(cur?.id ?? '')}</td><td>${state}</td></tr>`;
   }).join('');
   const models = new Set(Object.keys(V).map((v) => current(outfit, v)?.model).filter(Boolean));
   const notes = [
@@ -197,11 +231,26 @@ function outfitSection(asset, oid, assetDir, outDir, ui) {
   ].join('');
   const details = viewsOfTier(outfit, 3);
   const look = ui.looks[outfit.look?.id] ?? lookName(outfit.look, ui.htmlLang.split('-')[0]);
+  const bustVers = versionsData('face-front');
+  const bustCur = current(outfit, 'face-front');
+  const bustPill = bustVers.length > 1
+    ? `<span class="rp-ab-pill" title="点击对比变体" data-ab-type="refs" data-ab-title="${esc(asset.name)} · ${esc(outfit.label)} · ${esc(label('face-front'))}" data-ab-asset="${esc(rel(outDir, join(assetDir, 'asset.json')))}" data-ab-view="face-front" data-ab-outfit="${esc(oid)}" data-ab-current="${bustCur ? bustCur.v : 1}" data-ab-versions="${esc(JSON.stringify(bustVers))}">v${bustCur ? bustCur.v : 1} (${bustVers.length}版)</span>`
+    : '';
   const sheet = tierNow <= 1
     ? `<div class="card1">${img(ANCHOR)}<div class="card1-info"><b>${esc(ui.tier1Only)}</b><p>${esc(conf)}</p>${desc}</div></div>`
-    : `<div class="sheet"><div class="bust">${img('face-front')}</div><div class="right">
-  <div class="turn">${['front-full', 'side-full', 'back-full'].map((v) => `<div class="full">${img(v)}<em>${esc(label(v))}</em></div>`).join('')}</div>
-  <div class="details" style="--n:${Math.max(1, details.length)}">${details.map((v) => `<div class="cell">${img(v)}<em>${esc(label(v))}</em></div>`).join('')}</div>
+    : `<div class="sheet"><div class="bust">${img('face-front')}${bustPill}</div><div class="right">
+  <div class="turn">${['front-full', 'side-full', 'back-full'].map((v) => {
+    const vers = versionsData(v);
+    const cur = current(outfit, v);
+    const tag = vers.length > 1 ? ` · v${cur ? cur.v : 1}(${vers.length}版)` : cur ? ` · v${cur.v}` : '';
+    return `<div class="full">${img(v)}<em>${esc(label(v))}${tag}</em></div>`;
+  }).join('')}</div>
+  <div class="details" style="--n:${Math.max(1, details.length)}">${details.map((v) => {
+    const vers = versionsData(v);
+    const cur = current(outfit, v);
+    const tag = vers.length > 1 ? ` · v${cur ? cur.v : 1}(${vers.length}版)` : cur ? ` · v${cur.v}` : '';
+    return `<div class="cell">${img(v)}<em>${esc(label(v))}${tag}</em></div>`;
+  }).join('')}</div>
 </div></div>${desc}`;
   const extra = current(outfit, 'face-45') ? `<div class="extra">${img('face-45')}<span>${esc(ui.face45Extra)}</span></div>` : '';
   const T = ui.th;
@@ -264,6 +313,10 @@ table{border-collapse:collapse;width:100%;font-size:12px;margin-top:8px}th,td{te
 .extra{flex:none;margin-top:8px;display:flex;flex-direction:column;gap:4px;align-items:center;max-width:230px;font-size:12px;color:var(--ink2);text-align:center}
 .extra .img{height:180px;max-width:100%;object-fit:contain;border:1px solid var(--rule);border-radius:2px;background:#fff}
 @media(max-width:700px){.vbody{flex-direction:column}.extra{align-self:center}}
+.bust{position:relative}
+.bust .rp-ab-pill{position:absolute;top:8px;right:8px;background:var(--card);border:1px solid var(--rule);border-radius:99px;padding:2px 8px;font-size:11px;font-weight:600;color:var(--ink2);box-shadow:0 2px 6px #0002;cursor:pointer}
+.rp-ab-open.mini{font-size:10px;padding:1px 6px;margin-left:4px;border:1px solid var(--rule);border-radius:3px;background:var(--card);color:var(--ink2);cursor:pointer}
+.rp-ab-open.mini:hover{border-color:var(--ok);color:var(--ok)}
 img.img{cursor:zoom-in}.lb{position:fixed;inset:0;background:#000c;display:none;align-items:center;justify-content:center}.lb.on{display:flex}.lb img{max-width:94vw;max-height:94vh}
 </style></head><body><main>
 <h1>${esc(ui.title)}</h1>
@@ -288,11 +341,13 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')lb.classList.remove(
 const USAGE = `character-refs.mjs —— 角色参考图
 
   config [--show]                          初次设置 / 查看配置（配置存在 skill 目录的 config.local.json）
-         [--model m]                       主图与派生图都用 m（qwen / codex / openai / custom:<名字>）
+         [--model m]                       主图与派生图都用 m（qwen / codex / antigravity / openai / gemini / custom:<名字>）
          [--anchor-model m] [--derive-model m]   分开设置
          [--confirm-anchor yes|no]         出完锚点是否停下来等人确认
          [--qwen-env-file 路径] [--qwen-url 地址] [--codex-bin 路径]
+         [--antigravity-bin 路径] [--agy-bin 路径]
          [--openai-env-file 路径] [--openai-base-url 地址] [--openai-model 名字]
+         [--gemini-env-file 路径] [--gemini-api-key 密钥] [--gemini-base-url 地址] [--gemini-model 名字] [--gemini-api 模式]
          [--custom 名字=命令模板]
   intake-template                          打印一次性输入的模板（给模型填）
   intake-check <intake.json>               校验并打印确认表；有问题 exit 1
@@ -301,10 +356,15 @@ const USAGE = `character-refs.mjs —— 角色参考图
   looks                                    列出画风预设
   look-template [预设]                     打印一个预设的画风层，改完存成文件用 --look 传入
   restyle <asset.json> --look 画风 [--outfit id]   给已有角色换画风；已有的图全部标过期
-  prompt <asset.json> <视图> [--outfit id]  打印这张图的提示词、反向词、比例、参考图
+  prompt <asset.json> <视图> [--outfit id] [--patch 文字]
+                                           打印这张图的提示词、反向词、比例、参考图
   gen <asset.json> [<视图>... | --tier N]  出图；不给视图和档位 = 补齐默认的第二档（锚点、大头照、侧面、背面）；
                                            已有的视图再出一次就是新版本（重出）
-      [--outfit id] [--model m] [--seed n] [--reason 文字] [--no-confirm]
+      [--outfit id] [--model m] [--seed n] [--patch 文字] [--reason 文字] [--no-confirm]
+  select <asset.json> <视图> <--version v | v编号> [--outfit id]
+                                           切换/选定该视图的定稿版本（如从多版变体探索中挑中 v2 设为主版）
+  versions <asset.json> [视图] [--outfit id]
+                                           查看历史版本与探索变体列表（标示当前定稿、微调说明与质检门）
   confirm <asset.json> [--outfit id]       确认锚点
   check <asset.json> [--outfit id]         检查门与过期；有问题 exit 1
   render <asset.json>... [--out report.html] [--lang 代码] [--ui ui.json]
@@ -337,9 +397,15 @@ async function main(argv) {
     const qe = flag(rest, '--qwen-env-file'); if (qe) cfg.models.qwen.envFile = resolve(qe);
     const qu = flag(rest, '--qwen-url'); if (qu) cfg.models.qwen.url = qu;
     const cb = flag(rest, '--codex-bin'); if (cb) cfg.models.codex.bin = resolve(cb);
+    const ab = flag(rest, '--antigravity-bin') || flag(rest, '--agy-bin'); if (ab) cfg.models.antigravity.bin = resolve(ab);
     const oe = flag(rest, '--openai-env-file'); if (oe) cfg.models.openai.envFile = resolve(oe);
     const ob = flag(rest, '--openai-base-url'); if (ob) cfg.models.openai.baseUrl = ob;
     const om = flag(rest, '--openai-model'); if (om) cfg.models.openai.model = om;
+    const ge = flag(rest, '--gemini-env-file'); if (ge) cfg.models.gemini.envFile = resolve(ge);
+    const gk = flag(rest, '--gemini-api-key'); if (gk) cfg.models.gemini.apiKey = gk;
+    const gb = flag(rest, '--gemini-base-url'); if (gb) cfg.models.gemini.baseUrl = gb;
+    const gm = flag(rest, '--gemini-model'); if (gm) cfg.models.gemini.model = gm;
+    const ga = flag(rest, '--gemini-api'); if (ga) cfg.models.gemini.api = ga;
     const cu = flag(rest, '--custom');
     if (cu) {
       const i = cu.indexOf('=');
@@ -422,9 +488,15 @@ async function main(argv) {
 
   if (cmd === 'prompt') {
     const [p, view] = posArgs(rest);
-    if (!p || !view) throw new Error('用法：prompt <asset.json> <视图> [--outfit id]');
+    if (!p || !view) throw new Error('用法：prompt <asset.json> <视图> [--outfit id] [--patch 文字]');
     const asset = readJson(p);
-    console.log(JSON.stringify(buildPrompt(asset, oid, view, asset.outfits[oid]?.look ?? DEFAULT_LOOK), null, 2));
+    const pr = buildPrompt(asset, oid, view, asset.outfits[oid]?.look ?? DEFAULT_LOOK);
+    const patch = flag(rest, '--patch');
+    if (patch) {
+      const pText = String(patch).trim().replace(/\.?$/, '.');
+      pr.text = `${pr.text} Variant modification: ${pText}`;
+    }
+    console.log(JSON.stringify(pr, null, 2));
     return;
   }
 
@@ -451,9 +523,69 @@ async function main(argv) {
       writeJson(p, asset);
     }
     const seed = flag(rest, '--seed');
-    const failed = await genViews(p, list, { outfit: oid, model: flag(rest, '--model'), seed: seed === null ? null : Number(seed), noConfirm: rest.includes('--no-confirm') });
+    const patch = flag(rest, '--patch');
+    const reason = flag(rest, '--reason');
+    const failed = await genViews(p, list, {
+      outfit: oid,
+      model: flag(rest, '--model'),
+      seed: seed === null ? null : Number(seed),
+      patch,
+      reason,
+      noConfirm: rest.includes('--no-confirm'),
+    });
     if (failed) process.exit(1);
     if (!tier && !views.length && list.length === 1 && list[0] === ANCHOR) console.log(`  确认后再运行 gen ${p}，接着出大头照、侧面、背面`);
+    return;
+  }
+
+  if (cmd === 'select') {
+    const [p, view, vArg] = posArgs(rest);
+    const vOpt = flag(rest, '--version') || vArg;
+    if (!p || !view || !vOpt) throw new Error('用法：select <asset.json> <视图> <--version v | v编号> [--outfit id]');
+    const asset = readJson(p);
+    const outfit = asset.outfits[oid];
+    if (!outfit) throw new Error(`没有造型 ${oid}`);
+    const found = selectVersion(asset, oid, view, vOpt);
+    writeJson(p, asset);
+    console.log(`✓ 已将 ${asset.name}（${oid}）${view} 当前定稿版本设为 v${found.v}（${found.file}，由 ${found.model} 出图）`);
+    if (found.patch) console.log(`  变体修饰：${found.patch}`);
+    if (view === ANCHOR) {
+      const a = anchorUsable(asset, oid);
+      if (!a.ok) console.log(`  提示：${a.why}`);
+    }
+    return;
+  }
+
+  if (cmd === 'versions') {
+    const [p, targetView] = posArgs(rest);
+    if (!p) throw new Error('用法：versions <asset.json> [视图] [--outfit id]');
+    const asset = readJson(p);
+    const outfit = asset.outfits[oid];
+    if (!outfit) throw new Error(`没有造型 ${oid}`);
+    const viewsToShow = targetView ? [targetView] : Object.keys(outfit.views ?? {});
+    if (!viewsToShow.length) {
+      console.log(`${asset.name}（${oid}）暂无出图版本记录。`);
+      return;
+    }
+    for (const vId of viewsToShow) {
+      const slot = outfit.views?.[vId];
+      if (!slot || !slot.versions?.length) {
+        console.log(`\n${asset.name}（${oid}）· ${vId}：无版本记录`);
+        continue;
+      }
+      console.log(`\n${asset.name}（${oid}）· ${vId}（当前定稿：v${slot.current}）：`);
+      for (const ver of slot.versions) {
+        const isCur = ver.v === slot.current;
+        const mark = isCur ? '*' : ' ';
+        const dateStr = ver.createdAt ? ver.createdAt.slice(0, 10) : '';
+        const gatesOk = (ver.gates ?? []).every((g) => g.ok);
+        const gatesStatus = gatesOk ? '门全过' : `门未过：${ver.gates.filter((g) => !g.ok).map((g) => g.label).join('、')}`;
+        const patchInfo = ver.patch ? `  变体微调：${ver.patch}` : '';
+        const notesInfo = ver.notes?.length ? `  注：${ver.notes.join('；')}` : '';
+        console.log(`  ${mark} v${ver.v}  ${padDisplay(ver.model, 12)}  ${dateStr}  ${gatesStatus}${patchInfo}${notesInfo}`);
+      }
+    }
+    console.log(`\n* 标示当前定稿。切换定稿：select ${p} <视图> --version <v>`);
     return;
   }
 

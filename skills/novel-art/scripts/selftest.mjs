@@ -4,7 +4,9 @@
 //   node scripts/selftest.mjs
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -17,6 +19,11 @@ import {
   slug,
   PROP_SCALES,
   validateArt,
+  findItem,
+  itemViews,
+  buildItemPrompt,
+  recordVersion,
+  selectVersion,
 } from './novel-art.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -471,4 +478,118 @@ eq(FIXTURE.props.length, 2, '样例带两件叙事道具');
   ok(gateEn.includes('Consistency anchors, 3–5'), 'EN 报告的质量门标签翻译且阈值原样保留');
   ok(!gateEn.includes('一致性锚点 3–5 个'), 'EN 报告不再出现中文门标签');
 }
+
+/* ---------------- 资产化版本管理 (scenes & props) ---------------- */
+
+{
+  const d = clone();
+  // 1. findItem
+  const s01 = findItem(d, 'S01');
+  ok(s01 && s01.name === '渡船船舱', 'findItem 按 S01 找到场景');
+  const p01 = findItem(d, 'P01');
+  ok(p01 && p01.name === '旧皮箱', 'findItem 按 P01 找到道具');
+  eq(findItem(d, '渡船船舱')?.id, 'S01', 'findItem 按中文名找到场景');
+  eq(findItem(d, '旧皮箱')?.id, 'P01', 'findItem 按中文名找到道具');
+  eq(findItem(d, 'non-existent'), null, 'findItem 不存在的返回 null');
+
+  // 2. itemViews
+  const sViews = itemViews(s01);
+  ok(sViews.sheet && sViews.master, '场景视图包含 sheet 与 master');
+  ok(sViews['light-晨雾'] && sViews['light-雾散近岸'], '场景视图包含光照时段变体');
+  eq(sViews.sheet.ratio, '16:9', '场景设定图比例为 16:9');
+
+  const pViews = itemViews(p01);
+  ok(pViews.sheet && pViews.master, '道具视图包含 sheet 与 master');
+  ok(pViews['state-合上'] && pViews['state-打开'], '道具视图包含状态变体');
+  eq(pViews.sheet.ratio, '1:1', '道具设定图比例为 1:1');
+
+  // 3. buildItemPrompt
+  const spMaster = buildItemPrompt(s01, 'master');
+  eq(spMaster.ratio, '16:9', '场景主视角提示词比例为 16:9');
+  ok(spMaster.text.includes(s01.image.prompt), '场景主视角提示词包含 image.prompt');
+
+  const spLight = buildItemPrompt(s01, 'light-晨雾');
+  ok(spLight.text.includes('Lighting and atmosphere:'), '光照提示词包含氛围修饰');
+
+  const spPatch = buildItemPrompt(s01, 'sheet', 'heavy snow accumulation on deck');
+  ok(spPatch.text.includes('Variant modification: heavy snow accumulation on deck.'), 'buildItemPrompt 支持 --patch 微调');
+
+  const ppPatch = buildItemPrompt(p01, 'sheet', 'bloodstain near brass latch');
+  ok(ppPatch.text.includes('Variant modification: bloodstain near brass latch.'), '道具 buildItemPrompt 支持 --patch 微调');
+
+  assert.throws(() => buildItemPrompt(s01, 'invalid-view'), /未找到视图 invalid-view/); passed++;
+
+  // 4. recordVersion & selectVersion
+  const rec1 = recordVersion(d, 'S01', 'sheet', {
+    model: 'gemini-3.1-flash-image',
+    prompt: spMaster.text,
+  });
+  eq(rec1.version.v, 1, '首个版本编号为 v1');
+  eq(s01.views.sheet.current, 1, '首个版本设为当前定稿');
+
+  const rec2 = recordVersion(d, 'S01', 'sheet', {
+    model: 'gemini-3.1-flash-image',
+    prompt: spPatch.text,
+    patch: 'heavy snow accumulation on deck',
+  });
+  eq(rec2.version.v, 2, '追加生成版本编号递增为 v2');
+  eq(rec2.version.patch, 'heavy snow accumulation on deck', '版本记录 patch 字段');
+  eq(s01.views.sheet.current, 2, '追加生成版本默认成为当前定稿');
+
+  // selectVersion 切回 v1
+  const sel1 = selectVersion(d, 'S01', 'sheet', 1);
+  eq(sel1.v, 1, 'selectVersion 切回 v1');
+  eq(s01.views.sheet.current, 1, 'current 指针更新为 1');
+
+  // selectVersion 切回 v2 (字符串格式)
+  const sel2 = selectVersion(d, 'S01', 'sheet', 'v2');
+  eq(sel2.v, 2, 'selectVersion 支持 "v2" 传参');
+  eq(s01.views.sheet.current, 2, 'current 指针更新为 2');
+
+  assert.throws(() => selectVersion(d, 'S01', 'sheet', 99), /找不到版本 v99/); passed++;
+  assert.throws(() => selectVersion(d, 'S01', 'no-view', 1), /还没有生成过任何版本/); passed++;
+  assert.throws(() => selectVersion(d, 'S01', 'sheet', 'bad'), /无效的版本号/); passed++;
+  assert.throws(() => selectVersion(d, 'no-item', 'sheet', 1), /未找到场景或道具/); passed++;
+
+  // 5. HTML 渲染中的版本标识
+  const h = renderHtml(d);
+  ok(h.includes('>v2<') || h.includes('v2'), 'HTML 报告显示当前定稿版本号');
+  ok(h.includes('heavy snow accumulation on deck'), 'HTML 报告显示变体微调内容');
+}
+
+/* ---------------- CLI 集成测试 ---------------- */
+{
+  const tmpDir = mkdtempSync(join(tmpdir(), 'novel-art-selftest-'));
+  const cliPath = join(here, 'novel-art.mjs');
+  const run = (...a) => spawnSync(process.execPath, [cliPath, ...a], { encoding: 'utf8' });
+
+  const testArtPath = join(tmpDir, 'test-art.json');
+  const d = clone();
+  recordVersion(d, 'S01', 'sheet', { model: 'gemini-3.1-flash-image', prompt: 'prompt 1' });
+  recordVersion(d, 'S01', 'sheet', { model: 'gemini-3.1-flash-image', prompt: 'prompt 2', patch: 'autumn leaves' });
+  writeFileSync(testArtPath, JSON.stringify(d, null, 2), 'utf8');
+
+  // prompt
+  const prRun = run('prompt', testArtPath, 'S01', 'sheet', '--patch', 'frost on windows');
+  ok(prRun.status === 0 && prRun.stdout.includes('Variant modification: frost on windows.'), 'CLI prompt 命令支持 --patch');
+
+  // versions
+  const verRun = run('versions', testArtPath, 'S01');
+  ok(verRun.status === 0 && verRun.stdout.includes('* v2') && verRun.stdout.includes('v1') && verRun.stdout.includes('autumn leaves'), 'CLI versions 命令列出历史版本与当前定稿 *');
+
+  // select
+  const selRun = run('select', testArtPath, 'S01', 'sheet', '1');
+  ok(selRun.status === 0 && selRun.stdout.includes('当前定稿版本设为 v1'), 'CLI select 命令切回 v1');
+  const readBack = JSON.parse(readFileSync(testArtPath, 'utf8'));
+  eq(readBack.scenes[0].views.sheet.current, 1, '磁盘上的 art.json current 更新为 1');
+
+  // select with --version
+  const selFlagRun = run('select', testArtPath, 'S01', 'sheet', '--version', '2');
+  ok(selFlagRun.status === 0 && selFlagRun.stdout.includes('当前定稿版本设为 v2'), 'CLI select 支持 --version');
+  const readBack2 = JSON.parse(readFileSync(testArtPath, 'utf8'));
+  eq(readBack2.scenes[0].views.sheet.current, 2, '磁盘上的 art.json current 恢复为 2');
+
+  rmSync(tmpDir, { recursive: true, force: true });
+}
+
 console.log(`✓ ${passed} 项自测全部通过`);

@@ -488,7 +488,7 @@ export function gates(buf, ratio, kind) {
  * @param confirmMode 仅锚点：'wait'（等人确认）| 'auto'（配置为不确认）
  * @returns {{version, buf}} buf 是打过标识、应写盘的字节
  */
-export function recordVersion(asset, oid, view, { buf, model, seed = null, prompt, refs = [], notes = [], confirmMode = 'wait', now = new Date() }) {
+export function recordVersion(asset, oid, view, { buf, model, seed = null, prompt, patch = null, refs = [], notes = [], confirmMode = 'wait', now = new Date() }) {
   const outfit = asset.outfits[oid];
   const spec = allViews(outfit)[view];
   const slot = (outfit.views[view] ??= { current: 0, versions: [] });
@@ -499,6 +499,7 @@ export function recordVersion(asset, oid, view, { buf, model, seed = null, promp
   const version = {
     v, id, file: `${oid}/${view}.v${v}.png`, sha256: sha256(out), model, seed,
     prompt: prompt.text, negative: prompt.negative,
+    patch: patch ? String(patch).trim() : null,
     refs: refs.map(({ view: rv, v: rvv, sha256: rs }) => ({ view: rv, v: rvv, sha256: rs })), notes,
     layersHash: viewLayersHash(resolveLayers(asset, oid), spec), lookHash: lookHash(outfit.look),
     gates: g, createdAt: now.toISOString(),
@@ -508,4 +509,20 @@ export function recordVersion(asset, oid, view, { buf, model, seed = null, promp
   slot.versions.push(version);
   slot.current = v;
   return { version, buf: out };
+}
+
+/**
+ * 切换某个视图的当前定稿版本（旧版本不删，选定任意一版作为当前 active 版本）。
+ */
+export function selectVersion(asset, oid, view, v) {
+  const outfit = asset.outfits[oid];
+  if (!outfit) throw new Error(`没有造型 ${oid}`);
+  const slot = outfit.views?.[view];
+  if (!slot || !slot.versions?.length) throw new Error(`${asset.name}（${oid}）的视图 ${view} 还没有生成过任何版本`);
+  const targetV = parseInt(String(v).replace(/^v/i, ''), 10);
+  if (isNaN(targetV)) throw new Error(`无效的版本号：${v}，应为整数或 v数字（如 v1、v2）`);
+  const found = slot.versions.find((x) => x.v === targetV);
+  if (!found) throw new Error(`在 ${asset.name}（${oid}）的 ${view} 中找不到版本 v${targetV}。可用版本：${slot.versions.map((x) => `v${x.v}`).join('、')}`);
+  slot.current = targetV;
+  return found;
 }

@@ -79,7 +79,9 @@ node {baseDir}/scripts/character-refs.mjs config --show
    - `qwen` —— Qwen Image 2.1，走自己的 ComfyUI 服务器。快（每张 25–45 秒）、尺寸精确、不吃订阅额度。
      需要 `COMFY_URL`（可选 `COMFY_USER` / `COMFY_PASS`），放环境变量或一个 .env 文件
    - `codex` —— codex 内置出图（GPT）。不要 API key，但**吃 ChatGPT 订阅额度**（Plus 约 25 张会触顶，几小时后恢复），每张 80–160 秒
+   - `antigravity`（或 `agy`） —— 本机 Antigravity CLI 内置出图（gemini-3.1-flash-image）。**不要 API key，吃 Google 订阅额度**，本机已登录 agy 即可直接出图
    - `openai` —— OpenAI Images API，默认 `gpt-image-2`。按量计费，要 `OPENAI_API_KEY`；也能指到兼容接口（`--openai-base-url`）
+   - `gemini` —— Google Gemini API，默认 `gemini-3.1-flash-image`（Antigravity / Google AI 原生环境自带，原生多图融合与高一致性）。要 `GEMINI_API_KEY` 或 `GOOGLE_API_KEY`（或 `--gemini-env-file` / `--gemini-api-key`）
    - `custom:<名字>` —— 用户自己的出图命令，见 `references/models.md`
 2. **派生图使用哪个模型**：默认与主图相同。可以分开（比如锚点 GPT、派生 Qwen）
 3. **出完锚点要不要停下来等人确认**：推荐 `yes`——锚点是全组的根，它不对后面全白出。
@@ -171,7 +173,7 @@ node {baseDir}/scripts/character-refs.mjs gen <asset.json> --tier 3 --reason "E0
 
 `--reason` 写为什么升档，记进资产。也可以只出某几张：`gen <asset.json> detail-hair detail-neck`。
 
-### Step 5 — 检查与重出
+### Step 5 — 检查、版本管理与变体微调
 
 ```bash
 node {baseDir}/scripts/character-refs.mjs check <asset.json>
@@ -186,6 +188,32 @@ node {baseDir}/scripts/character-refs.mjs gen <asset.json> detail-neck --model c
 
 门里「背景够白」对全身图查四边，对大头照只查上边和两侧上半段（身体本来就顶到下边），细节图跳过并明说。
 **门查不了长相、角度、取景**——出完一定要看图，这几项靠眼睛。
+
+#### 变体微调（--patch）
+当角色整体符合要求但某处需要临时微调（如“戴上眼镜”、“发带换成翡翠簪子”），使用 `--patch` 生成变体版本，不修改 `asset.json` 基础层：
+
+```bash
+# 预览带微调修饰的提示词
+node {baseDir}/scripts/character-refs.mjs prompt <asset.json> face-front --patch "wearing jade hairpins"
+
+# 生成变体版本并记录到资产中
+node {baseDir}/scripts/character-refs.mjs gen <asset.json> face-front --patch "wearing jade hairpins"
+```
+
+提示词末尾会自动追加 `Variant modification: <patch>`，生成的版本在 `asset.json` 记录 `patch` 字段。
+
+#### 查看版本与切换定稿（versions & select）
+每个视图重出或生成变体后，旧版文件和记录都会完整保留。可随时查看历史版本并切换哪一版作为当前定稿：
+
+```bash
+# 查看所有视图或指定视图的历史版本清单（* 标示当前定稿）
+node {baseDir}/scripts/character-refs.mjs versions <asset.json> [视图]
+
+# 选定某版作为当前生效定稿（支持 v1 或 1）
+node {baseDir}/scripts/character-refs.mjs select <asset.json> face-front 1
+```
+
+执行 `select` 后，`slot.current` 立即更新，下游报告（`render`）、依赖此图的派生视图过期检测（`check`）将即时自动重定向绑定到该版本。
 
 ### Step 6 — 报告
 

@@ -49,6 +49,7 @@
   "model": "qwen",                             // 这张使用的模型；同组混用只提醒
   "seed": 1980929016,
   "prompt": "…", "negative": "…",              // 实际发出去的提示词
+  "patch": "wearing jade hairpins",            // 可省：变体微调描述（--patch）
   "refs": [ { "view": "front-full", "v": 1, "sha256": "…" } ],   // 实际挂了哪几张参考图
   "notes": [],                                 // 比如「face-front 缺失或已过期，这张只挂锚点」
   "layersHash": "…",                           // 出图时的文字描述指纹

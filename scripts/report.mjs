@@ -242,12 +242,12 @@ export function scopeCss(css, scope) {
  */
 export function scopeHtml(body, prefix) {
   return body
-    .replace(/\bid="([^"]+)"/g, (_, id) => `id="${prefix}${id}"`)
+    .replace(/(^|[\s<])id="([^"]+)"/g, (_, p, id) => `${p}id="${prefix}${id}"`)
     .replace(/\bhref="#([^"]+)"/g, (_, id) => `href="#${prefix}${id}"`)
     .replace(/\bdata-pane="([^"]+)"/g, (_, id) => `data-pane="${prefix}${id}"`)
     .replace(/\bdata-target="([^"]+)"/g, (_, id) => `data-target="${prefix}${id}"`)
     .replace(/\baria-controls="([^"]+)"/g, (_, id) => `aria-controls="${prefix}${id}"`)
-    .replace(/\bfor="([^"]+)"/g, (_, id) => `for="${prefix}${id}"`);
+    .replace(/(^|[\s<])for="([^"]+)"/g, (_, p, id) => `${p}for="${prefix}${id}"`);
 }
 
 /**
@@ -269,6 +269,20 @@ export function rebaseAssets(text, fromDir, outDir) {
   };
   return text
     .replace(/\b(src|data-img|data-src|poster)="([^"]*)"/g, (m, attr, val) => `${attr}="${fix(val)}"`)
+    .replace(/\bdata-ab-asset="([^"]*)"/g, (m, val) => `data-ab-asset="${fix(val)}"`)
+    .replace(/\bdata-ab-versions="([^"]*)"/g, (m, val) => {
+      try {
+        const decoded = val.replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+        const list = JSON.parse(decoded);
+        for (const item of list) {
+          if (item.src) item.src = fix(item.src);
+        }
+        const encoded = JSON.stringify(list).replace(/"/g, '&quot;');
+        return `data-ab-versions="${encoded}"`;
+      } catch {
+        return m;
+      }
+    })
     // 内联样式与样式表里的 `url(...)`。角色报告的缩略图就走这条
     // （`style="background-image:url('images/…')"`），只查属性会漏掉它，
     // 表现是缩略图 404 但大图正常——很不好排查，所以两条路都覆盖。
@@ -349,6 +363,25 @@ const SHELL_I18N = {
     collapse: '回到分栏',
     empty: '没有任何一段的产出——至少要给一份 json',
     htmlLang: 'zh',
+    reviewTitle: '资产变体对比与定稿',
+    splitMode: '◫ 双图并排',
+    sliderMode: '◧ 划卷滑块',
+    singleMode: '▢ 单图检视',
+    slotA: 'A 栏',
+    slotB: 'B 栏',
+    currentMaster: '⭐ 当前定稿',
+    candidateVariant: '候选变体',
+    makeMaster: '⭐ 设为定稿',
+    copyCmd: '📋 复制定稿命令',
+    copiedToast: '✓ 已复制定稿命令到剪贴板！',
+    filmstripTitle: '历史候选版本胶卷（点击缩略图切换对比 / 设为 A·B 栏）',
+    filmstripHint: '快捷键：←/→ 切换版本 · Esc 关闭 · 1/2/3 切换视图',
+    diffPatch: '变体微调：',
+    noPatch: '（基准初始版本）',
+    modelLab: '模型：',
+    gatesLab: '质检：',
+    timeLab: '生成时间：',
+    close: '关闭 (Esc)',
   },
   en: {
     kicker: 'Short-drama production report',
@@ -358,6 +391,25 @@ const SHELL_I18N = {
     collapse: 'Back to panes',
     empty: 'No stage produced anything — pass at least one json',
     htmlLang: 'en',
+    reviewTitle: 'Asset Variant Comparison & Selection',
+    splitMode: '◫ Side-by-Side',
+    sliderMode: '◧ Split Slider',
+    singleMode: '▢ Single View',
+    slotA: 'Slot A',
+    slotB: 'Slot B',
+    currentMaster: '⭐ Current Master',
+    candidateVariant: 'Candidate Variant',
+    makeMaster: '⭐ Make Master',
+    copyCmd: '📋 Copy Selection CLI',
+    copiedToast: '✓ Copied selection CLI to clipboard!',
+    filmstripTitle: 'Historical Candidates Filmstrip (Click to inspect or assign to Slot A / B)',
+    filmstripHint: 'Shortcuts: ←/→ Cycle versions · Esc Close · 1/2/3 Switch mode',
+    diffPatch: 'Variant Patch:',
+    noPatch: '(Initial Baseline)',
+    modelLab: 'Model:',
+    gatesLab: 'Gates:',
+    timeLab: 'Created:',
+    close: 'Close (Esc)',
   },
 };
 
@@ -461,6 +513,180 @@ body{
   .rp-pane{display:block!important;break-after:page}
 }
 
+/* ---- 变体评审工作台与 A/B 对比弹层 ---- */
+.rp-ab-modal{
+  position:fixed;inset:0;z-index:99999;display:none;align-items:center;justify-content:center;
+  background:rgba(12,14,16,.86);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  padding:20px;
+}
+.rp-ab-modal.rp-on{display:flex}
+.rp-ab-dialog{
+  position:relative;width:1440px;max-width:98vw;height:94vh;background:var(--paper);
+  border:1px solid var(--rule-2);border-radius:10px;display:flex;flex-direction:column;
+  overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,.45);
+}
+.rp-ab-head{
+  display:flex;align-items:center;justify-content:space-between;padding:12px 18px;
+  background:var(--panel);border-bottom:1px solid var(--rule);gap:14px;flex:none;
+}
+.rp-ab-titles{min-width:0;flex:1}
+.rp-ab-titles h3{margin:0;font-size:16px;font-weight:650;color:var(--ink);letter-spacing:.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rp-ab-titles p{margin:2px 0 0;font-size:11.5px;color:var(--ink-3);letter-spacing:.03em}
+.rp-ab-modes{display:inline-flex;border:1px solid var(--rule-2);border-radius:6px;overflow:hidden;background:var(--paper)}
+.rp-ab-mbtn{
+  padding:6px 13px;font-size:12px;border:0;background:transparent;cursor:pointer;
+  color:var(--ink-2);font-family:inherit;font-weight:500;transition:.12s;
+}
+.rp-ab-mbtn.rp-on{background:var(--ink);color:#fff}
+.rp-ab-close{
+  background:transparent;border:0;font-size:20px;line-height:1;cursor:pointer;
+  padding:6px 10px;border-radius:5px;color:var(--ink-3);transition:.12s;
+}
+.rp-ab-close:hover{color:var(--seal);background:var(--seal-soft)}
+
+/* ---- 对比舞台 ---- */
+.rp-ab-stage{flex:1 1 auto;overflow:hidden;position:relative;background:#0f1114;display:flex}
+.rp-ab-view{position:absolute;inset:0;display:none;width:100%;height:100%;padding:14px 16px;overflow:hidden}
+.rp-ab-view.rp-on{display:flex}
+
+/* 并排模式 */
+.rp-ab-split.rp-on{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.rp-ab-col{
+  display:flex;flex-direction:column;background:#15181c;border:1px solid #272c32;
+  border-radius:8px;overflow:hidden;height:100%;min-height:0;
+}
+.rp-ab-col-head{
+  display:flex;align-items:center;gap:8px;padding:8px 12px;background:#1a1e23;
+  border-bottom:1px solid #272c32;flex:none;
+}
+.rp-ab-badge-slot{font-size:11px;font-weight:700;padding:2px 7px;border-radius:4px;flex:none}
+.rp-ab-badge-slot.slot-a{background:#234b34;color:#84e1a7}
+.rp-ab-badge-slot.slot-b{background:#6e2e22;color:#ffab9d}
+.rp-ab-select{
+  padding:4px 8px;border-radius:4px;border:1px solid #3c444d;background:#23282f;
+  color:#e4e7ea;font-size:12px;flex:1;min-width:0;outline:none;
+}
+.rp-ab-tag-master{font-size:11px;padding:2px 7px;border-radius:3px;font-weight:500;flex:none}
+.rp-ab-tag-master.is-master{background:#ffd70022;color:#ffd700;border:1px solid #ffd70055}
+.rp-ab-tag-master.not-master{background:#ffffff11;color:#8c939b}
+.rp-ab-btn-master{
+  padding:3px 9px;border-radius:4px;border:1px solid #e09320;background:#965a04;
+  color:#fff;font-size:11px;cursor:pointer;flex:none;transition:.12s;
+}
+.rp-ab-btn-master:hover{background:#b86e05}
+.rp-ab-btn-master[disabled]{opacity:.4;pointer-events:none}
+.rp-ab-imgbox{
+  flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;
+  overflow:hidden;padding:12px;position:relative;background:#0d0f12;
+}
+.rp-ab-imgbox img{max-width:100%;max-height:100%;object-fit:contain;border-radius:4px;box-shadow:0 6px 20px rgba(0,0,0,.6)}
+.rp-ab-meta{
+  flex:none;padding:10px 14px;background:#16191d;border-top:1px solid #272c32;
+  font-size:11.5px;color:#a8adb3;
+}
+.rp-ab-patch{
+  background:#2e2217;border:1px solid #7c4819;color:#ffc58a;padding:5px 9px;
+  border-radius:4px;margin-bottom:6px;word-break:break-word;line-height:1.45;
+}
+.rp-ab-meta-grid{display:flex;flex-wrap:wrap;gap:6px 14px}
+.rp-ab-meta-chip{color:#82888f}
+.rp-ab-meta-chip b{color:#d8dde2;font-weight:500}
+
+/* 划卷滑块模式 */
+.rp-ab-slider.rp-on{display:flex;align-items:center;justify-content:center;padding:12px}
+.rp-ab-slider-wrap{
+  position:relative;width:100%;height:100%;max-width:1200px;background:#111417;
+  border-radius:8px;overflow:hidden;display:flex;align-items:center;justify-content:center;
+  user-select:none;-webkit-user-select:none;touch-action:none;cursor:ew-resize;
+}
+.rp-ab-slider-layer{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.rp-ab-slider-layer img{max-width:96%;max-height:96%;object-fit:contain;pointer-events:none;user-select:none}
+.rp-ab-slider-top{clip-path:inset(0 0 0 calc(var(--pos, 50) * 1%))}
+.rp-ab-slider-bar{
+  position:absolute;top:0;bottom:0;left:calc(var(--pos, 50) * 1%);width:2px;
+  background:#ffffff;z-index:10;transform:translateX(-50%);pointer-events:none;
+  box-shadow:0 0 10px rgba(0,0,0,.8);
+}
+.rp-ab-slider-btn{
+  position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:34px;height:34px;
+  border-radius:50%;background:#ffffff;color:#181a1c;box-shadow:0 2px 10px rgba(0,0,0,.6);
+  display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;
+  letter-spacing:1px;
+}
+.rp-ab-tag-corner{
+  position:absolute;top:14px;font-size:11px;padding:4px 10px;border-radius:4px;
+  font-weight:600;z-index:15;pointer-events:none;
+}
+.rp-ab-tag-corner.tag-a{left:16px;background:rgba(35,75,52,.88);color:#84e1a7}
+.rp-ab-tag-corner.tag-b{right:16px;background:rgba(110,46,34,.88);color:#ffab9d}
+
+/* 单图模式 */
+.rp-ab-single.rp-on{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:10px}
+.rp-ab-single-wrap{flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;width:100%}
+.rp-ab-single-wrap img{max-width:96%;max-height:96%;object-fit:contain;border-radius:4px;box-shadow:0 6px 24px rgba(0,0,0,.6)}
+.rp-ab-single-meta{flex:none;background:#15181c;border:1px solid #272c32;border-radius:6px;padding:8px 16px;font-size:12px;color:#a8adb3;max-width:900px;width:90%}
+
+/* 胶卷缩略图条 */
+.rp-ab-filmstrip{
+  flex:none;height:124px;background:var(--panel);border-top:1px solid var(--rule);
+  display:flex;flex-direction:column;padding:6px 16px 8px;gap:5px;
+}
+.rp-ab-film-head{display:flex;justify-content:space-between;align-items:baseline;font-size:11px;color:var(--ink-3)}
+.rp-ab-film-head b{color:var(--ink);font-weight:600}
+.rp-ab-track{display:flex;gap:10px;overflow-x:auto;flex:1 1 auto;min-height:0;padding-bottom:2px}
+.rp-ab-card{
+  flex:0 0 170px;border:1px solid var(--rule);border-radius:6px;background:var(--paper);
+  display:flex;gap:8px;padding:5px;cursor:pointer;transition:.12s;position:relative;
+  text-align:left;font:inherit;
+}
+.rp-ab-card:hover{border-color:var(--rule-2);background:#fff}
+.rp-ab-card.is-a{border-color:#3d6b4f;background:#edf5ef;box-shadow:0 0 0 1px #3d6b4f}
+.rp-ab-card.is-b{border-color:var(--seal);background:var(--seal-soft);box-shadow:0 0 0 1px var(--seal)}
+.rp-ab-thumb{flex:0 0 52px;height:100%;border-radius:4px;background:#000;overflow:hidden}
+.rp-ab-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.rp-ab-info{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;justify-content:space-between}
+.rp-ab-vhead{display:flex;align-items:center;gap:4px;white-space:nowrap}
+.rp-ab-vhead b{font-size:12px;color:var(--ink)}
+.rp-ab-star{color:#e09320;font-size:11px}
+.rp-ab-chip-slot{font-size:9.5px;font-weight:700;padding:1px 4px;border-radius:2px;margin-left:auto}
+.rp-ab-chip-slot.sa{background:#234b34;color:#84e1a7}
+.rp-ab-chip-slot.sb{background:#6e2e22;color:#ffab9d}
+.rp-ab-vpatch{
+  font-size:10px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.3;
+}
+.rp-ab-vmodel{font-size:9.5px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* 定稿命令底栏 */
+.rp-ab-foot{
+  display:flex;align-items:center;justify-content:space-between;padding:9px 18px;
+  background:var(--paper);border-top:1px solid var(--rule);gap:12px;flex:none;
+}
+.rp-ab-cmdbox{display:flex;align-items:center;gap:8px;flex:1 1 auto;min-width:0}
+.rp-ab-cmdlab{font-size:11.5px;color:var(--ink-3);flex:none;white-space:nowrap}
+.rp-ab-cmdbox code{
+  font-size:11px;font-family:ui-monospace,Menlo,monospace;background:var(--panel);
+  border:1px solid var(--rule);border-radius:4px;padding:5px 8px;flex:1 1 auto;
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink);
+}
+.rp-ab-copycmd{
+  padding:6px 14px;font-size:12px;font-weight:500;font-family:inherit;
+  background:var(--seal);color:#fff;border:0;border-radius:5px;cursor:pointer;
+  transition:.12s;flex:none;white-space:nowrap;
+}
+.rp-ab-copycmd:hover{background:#a33e2c}
+.rp-ab-toast{display:none;font-size:11.5px;color:var(--ok);font-weight:600;flex:none}
+.rp-ab-toast.rp-on{display:inline-block}
+
+/* 小药丸微调角标 */
+.rp-ab-open{cursor:pointer}
+.rp-ab-pill{
+  display:inline-flex;align-items:center;gap:3px;font-size:10px;font-weight:600;
+  padding:1px 6px;border-radius:99px;border:1px solid var(--rule-2);background:var(--panel);
+  color:var(--ink-2);cursor:pointer;transition:.12s;margin-left:4px;
+}
+.rp-ab-pill:hover{border-color:var(--seal);color:var(--seal)}
+
 /* ---- 各面板自己的样式，已加作用域前缀 ---- */
 ${panes.map((p) => `/* ===== ${p.id} ===== */\n${p.css}`).join('\n')}
 </style>
@@ -484,6 +710,97 @@ ${panes.map((p) => `/* ===== ${p.id} ===== */\n${p.css}`).join('\n')}
 ${body}
   </main>
 </div>
+<div class="rp-ab-modal" id="rp-ab-modal" role="dialog" aria-modal="true" aria-hidden="true">
+  <div class="rp-ab-dialog">
+    <header class="rp-ab-head">
+      <div class="rp-ab-titles">
+        <h3 id="rp-ab-title">${esc(t.reviewTitle)}</h3>
+        <p id="rp-ab-sub"></p>
+      </div>
+      <div class="rp-ab-modes" role="tablist">
+        <button class="rp-ab-mbtn rp-on" data-mode="split" type="button">${esc(t.splitMode)}</button>
+        <button class="rp-ab-mbtn" data-mode="slider" type="button">${esc(t.sliderMode)}</button>
+        <button class="rp-ab-mbtn" data-mode="single" type="button">${esc(t.singleMode)}</button>
+      </div>
+      <button class="rp-ab-close" id="rp-ab-close" type="button" aria-label="${esc(t.close)}">✕</button>
+    </header>
+
+    <div class="rp-ab-stage">
+      <!-- 并排对比 -->
+      <div class="rp-ab-view rp-ab-split rp-on" id="rp-ab-view-split">
+        <div class="rp-ab-col" id="rp-ab-col-a">
+          <div class="rp-ab-col-head">
+            <span class="rp-ab-badge-slot slot-a">${esc(t.slotA)}</span>
+            <select class="rp-ab-select" id="rp-ab-select-a" aria-label="${esc(t.slotA)}"></select>
+            <span class="rp-ab-tag-master" id="rp-ab-tag-a"></span>
+            <button class="rp-ab-btn-master" id="rp-ab-btn-a" type="button">${esc(t.makeMaster)}</button>
+          </div>
+          <div class="rp-ab-imgbox">
+            <img id="rp-ab-img-a" src="" alt="${esc(t.slotA)}">
+          </div>
+          <div class="rp-ab-meta" id="rp-ab-meta-a"></div>
+        </div>
+
+        <div class="rp-ab-col" id="rp-ab-col-b">
+          <div class="rp-ab-col-head">
+            <span class="rp-ab-badge-slot slot-b">${esc(t.slotB)}</span>
+            <select class="rp-ab-select" id="rp-ab-select-b" aria-label="${esc(t.slotB)}"></select>
+            <span class="rp-ab-tag-master" id="rp-ab-tag-b"></span>
+            <button class="rp-ab-btn-master" id="rp-ab-btn-b" type="button">${esc(t.makeMaster)}</button>
+          </div>
+          <div class="rp-ab-imgbox">
+            <img id="rp-ab-img-b" src="" alt="${esc(t.slotB)}">
+          </div>
+          <div class="rp-ab-meta" id="rp-ab-meta-b"></div>
+        </div>
+      </div>
+
+      <!-- 划卷滑块对比 -->
+      <div class="rp-ab-view rp-ab-slider" id="rp-ab-view-slider">
+        <div class="rp-ab-slider-wrap" id="rp-ab-slider-wrap" style="--pos:50">
+          <div class="rp-ab-slider-layer rp-ab-slider-bottom">
+            <img id="rp-ab-simg-a" src="" alt="${esc(t.slotA)}">
+            <span class="rp-ab-tag-corner tag-a" id="rp-ab-stag-a">A: v1</span>
+          </div>
+          <div class="rp-ab-slider-layer rp-ab-slider-top">
+            <img id="rp-ab-simg-b" src="" alt="${esc(t.slotB)}">
+            <span class="rp-ab-tag-corner tag-b" id="rp-ab-stag-b">B: v2</span>
+          </div>
+          <div class="rp-ab-slider-bar">
+            <div class="rp-ab-slider-btn">◂ ▸</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 单图检视 -->
+      <div class="rp-ab-view rp-ab-single" id="rp-ab-view-single">
+        <div class="rp-ab-single-wrap">
+          <img id="rp-ab-single-img" src="" alt="${esc(t.singleMode)}">
+        </div>
+        <div class="rp-ab-single-meta" id="rp-ab-single-meta"></div>
+      </div>
+    </div>
+
+    <!-- 底部胶卷 -->
+    <div class="rp-ab-filmstrip">
+      <div class="rp-ab-film-head">
+        <span><b>${esc(t.filmstripTitle)}</b></span>
+        <span>${esc(t.filmstripHint)}</span>
+      </div>
+      <div class="rp-ab-track" id="rp-ab-track"></div>
+    </div>
+
+    <!-- 底部定稿命令 -->
+    <footer class="rp-ab-foot">
+      <div class="rp-ab-cmdbox">
+        <span class="rp-ab-cmdlab">${esc(lang === 'en' ? 'Lock Selection CLI:' : '终端定稿命令：')}</span>
+        <code id="rp-ab-cmd">node ...</code>
+      </div>
+      <button class="rp-ab-copycmd" id="rp-ab-copycmd" type="button">${esc(t.copyCmd)}</button>
+      <span class="rp-ab-toast" id="rp-ab-toast">${esc(t.copiedToast)}</span>
+    </footer>
+  </div>
+</div>
 <script>
 (function(){
   var app=document.getElementById('rp-app');
@@ -502,7 +819,9 @@ ${body}
   document.addEventListener('keydown',function(e){
     if(e.metaKey||e.ctrlKey||e.altKey)return;
     var tag=(e.target&&e.target.tagName||'').toLowerCase();
-    if(tag==='input'||tag==='textarea')return;
+    if(tag==='input'||tag==='textarea'||tag==='select')return;
+    var abM=document.getElementById('rp-ab-modal');
+    if(abM&&abM.classList.contains('rp-on'))return;
     var i=parseInt(e.key,10);
     if(i>=1&&i<=navs.length){app.classList.remove('rp-all');show(navs[i-1].dataset.pane);}
   });
@@ -516,6 +835,314 @@ ${body}
   // 深链：#pane-script 直接落到那一屏
   var h=(location.hash||'').replace(/^#/,'');
   if(h&&document.getElementById(h))show(h);
+
+  // ================================================================
+  // 变体评审工作台 / A/B 对比交互脚本
+  // ================================================================
+  function esc(s) {
+    return String(s ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  var abModal = document.getElementById('rp-ab-modal');
+  var abTitle = document.getElementById('rp-ab-title');
+  var abSub = document.getElementById('rp-ab-sub');
+  var abClose = document.getElementById('rp-ab-close');
+  var abModes = [].slice.call(document.querySelectorAll('.rp-ab-mbtn'));
+  var abViews = {
+    split: document.getElementById('rp-ab-view-split'),
+    slider: document.getElementById('rp-ab-view-slider'),
+    single: document.getElementById('rp-ab-view-single'),
+  };
+  var abSelectA = document.getElementById('rp-ab-select-a');
+  var abSelectB = document.getElementById('rp-ab-select-b');
+  var abTagA = document.getElementById('rp-ab-tag-a');
+  var abTagB = document.getElementById('rp-ab-tag-b');
+  var abBtnA = document.getElementById('rp-ab-btn-a');
+  var abBtnB = document.getElementById('rp-ab-btn-b');
+  var abImgA = document.getElementById('rp-ab-img-a');
+  var abImgB = document.getElementById('rp-ab-img-b');
+  var abMetaA = document.getElementById('rp-ab-meta-a');
+  var abMetaB = document.getElementById('rp-ab-meta-b');
+  var abSImgA = document.getElementById('rp-ab-simg-a');
+  var abSImgB = document.getElementById('rp-ab-simg-b');
+  var abSTagA = document.getElementById('rp-ab-stag-a');
+  var abSTagB = document.getElementById('rp-ab-stag-b');
+  var abSingleImg = document.getElementById('rp-ab-single-img');
+  var abSingleMeta = document.getElementById('rp-ab-single-meta');
+  var abTrack = document.getElementById('rp-ab-track');
+  var abCmd = document.getElementById('rp-ab-cmd');
+  var abCopyCmd = document.getElementById('rp-ab-copycmd');
+  var abToast = document.getElementById('rp-ab-toast');
+  var sliderWrap = document.getElementById('rp-ab-slider-wrap');
+
+  var ctx = null;
+
+  function getCmd(v) {
+    if (!ctx) return '';
+    if (ctx.assetType === 'art') {
+      return 'node .agents/shuohao-skills/skills/novel-art/scripts/novel-art.mjs select ' +
+        (ctx.assetPath || 'art.json') + ' ' + (ctx.itemId || '') + ' ' + v;
+    }
+    return 'node .agents/shuohao-skills/skills/character-refs/scripts/character-refs.mjs select ' +
+      (ctx.assetPath || 'asset.json') + ' ' + ctx.view + ' ' + v +
+      (ctx.outfit && ctx.outfit !== 'default' ? ' --outfit ' + ctx.outfit : '');
+  }
+
+  function renderMetaHtml(ver) {
+    if (!ver) return '<div class="rp-ab-meta-grid">暂无信息</div>';
+    var patchHtml = ver.patch
+      ? '<div class="rp-ab-patch"><b>' + ${JSON.stringify(t.diffPatch)} + '</b>' + esc(ver.patch) + '</div>'
+      : '<div class="rp-ab-patch" style="background:#1c2024;border-color:#323840;color:#9aa0a6;"><b>' + ${JSON.stringify(t.diffPatch)} + '</b>' + ${JSON.stringify(t.noPatch)} + '</div>';
+    var chips = [];
+    if (ver.model) chips.push('<span class="rp-ab-meta-chip">' + ${JSON.stringify(t.modelLab)} + '<b>' + esc(ver.model) + '</b></span>');
+    if (ver.seed !== null && ver.seed !== undefined && ver.seed !== '') chips.push('<span class="rp-ab-meta-chip">Seed: <b>' + esc(ver.seed) + '</b></span>');
+    if (ver.gatesText) chips.push('<span class="rp-ab-meta-chip">' + ${JSON.stringify(t.gatesLab)} + '<b>' + esc(ver.gatesText) + '</b></span>');
+    if (ver.createdAt) chips.push('<span class="rp-ab-meta-chip">' + ${JSON.stringify(t.timeLab)} + '<b>' + esc(String(ver.createdAt).replace('T', ' ').slice(0, 16)) + '</b></span>');
+    return patchHtml + '<div class="rp-ab-meta-grid">' + chips.join('') + '</div>';
+  }
+
+  function populateSelect(selectEl, selectedVal) {
+    selectEl.innerHTML = '';
+    ctx.versions.forEach(function(ver) {
+      var opt = document.createElement('option');
+      opt.value = String(ver.v);
+      opt.textContent = 'v' + ver.v + (ver.v === ctx.currentMasterV ? ' (⭐ 定稿)' : '') + (ver.patch ? ' · ' + ver.patch.slice(0, 24) : '');
+      if (ver.v === selectedVal) opt.selected = true;
+      selectEl.appendChild(opt);
+    });
+  }
+
+  function syncUI() {
+    if (!ctx) return;
+    abTitle.textContent = ctx.title;
+    abSub.textContent = (ctx.versions.length > 1
+      ? '共 ' + ctx.versions.length + ' 个历史候选版本 · 当前定稿：v' + ctx.currentMasterV
+      : '单版本资产 · 当前定稿：v' + ctx.currentMasterV);
+
+    abModes.forEach(function(b) { b.classList.toggle('rp-on', b.dataset.mode === ctx.mode); });
+    Object.keys(abViews).forEach(function(k) { abViews[k].classList.toggle('rp-on', k === ctx.mode); });
+
+    var verA = ctx.versions.find(function(x) { return x.v === ctx.slotA; }) || ctx.versions[0];
+    var verB = ctx.versions.find(function(x) { return x.v === ctx.slotB; }) || ctx.versions[Math.min(1, ctx.versions.length - 1)];
+
+    populateSelect(abSelectA, verA.v);
+    populateSelect(abSelectB, verB.v);
+
+    var isMasterA = verA.v === ctx.currentMasterV;
+    var isMasterB = verB.v === ctx.currentMasterV;
+
+    abTagA.textContent = isMasterA ? ${JSON.stringify(t.currentMaster)} : ${JSON.stringify(t.candidateVariant)};
+    abTagA.className = 'rp-ab-tag-master ' + (isMasterA ? 'is-master' : 'not-master');
+    abBtnA.disabled = isMasterA;
+
+    abTagB.textContent = isMasterB ? ${JSON.stringify(t.currentMaster)} : ${JSON.stringify(t.candidateVariant)};
+    abTagB.className = 'rp-ab-tag-master ' + (isMasterB ? 'is-master' : 'not-master');
+    abBtnB.disabled = isMasterB;
+
+    abImgA.src = verA.src || '';
+    abImgB.src = verB.src || '';
+    abMetaA.innerHTML = renderMetaHtml(verA);
+    abMetaB.innerHTML = renderMetaHtml(verB);
+
+    abSImgA.src = verA.src || '';
+    abSImgB.src = verB.src || '';
+    abSTagA.textContent = 'A: v' + verA.v + (isMasterA ? ' (⭐)' : '');
+    abSTagB.textContent = 'B: v' + verB.v + (isMasterB ? ' (⭐)' : '');
+
+    var singleVer = ctx.mode === 'single' ? verB : verA;
+    abSingleImg.src = singleVer.src || '';
+    abSingleMeta.innerHTML = renderMetaHtml(singleVer);
+
+    // 渲染底部胶卷
+    abTrack.innerHTML = '';
+    ctx.versions.forEach(function(ver) {
+      var card = document.createElement('div');
+      var isA = ver.v === verA.v;
+      var isB = ver.v === verB.v;
+      var isM = ver.v === ctx.currentMasterV;
+      card.className = 'rp-ab-card' + (isA ? ' is-a' : '') + (isB ? ' is-b' : '');
+      var chipSlot = isA ? '<span class="rp-ab-chip-slot sa">A 栏</span>'
+        : isB ? '<span class="rp-ab-chip-slot sb">B 栏</span>' : '';
+      var star = isM ? '<span class="rp-ab-star" title="当前定稿">⭐</span>' : '';
+      card.innerHTML = '<div class="rp-ab-thumb"><img src="' + esc(ver.src) + '" alt="v' + ver.v + '"></div>' +
+        '<div class="rp-ab-info">' +
+          '<div class="rp-ab-vhead"><b>v' + ver.v + '</b>' + star + chipSlot + '</div>' +
+          '<div class="rp-ab-vpatch">' + esc(ver.patch || '基准初始版本') + '</div>' +
+          '<div class="rp-ab-vmodel">' + esc(ver.model || '') + '</div>' +
+        '</div>';
+      card.addEventListener('click', function() {
+        if (ctx.mode === 'split') {
+          if (ver.v !== ctx.slotA) ctx.slotB = ver.v;
+          else if (ctx.versions.length > 1) {
+            ctx.slotA = ctx.slotB;
+            ctx.slotB = ver.v;
+          }
+        } else {
+          ctx.slotB = ver.v;
+          ctx.slotA = ver.v;
+        }
+        syncUI();
+      });
+      abTrack.appendChild(card);
+    });
+
+    var activeV = (ctx.slotB !== ctx.currentMasterV ? ctx.slotB : ctx.slotA);
+    abCmd.textContent = getCmd(activeV);
+  }
+
+  function copyText(txt) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(txt).catch(function(){});
+    }
+    abToast.classList.add('rp-on');
+    setTimeout(function() { abToast.classList.remove('rp-on'); }, 2200);
+  }
+
+  abCopyCmd.addEventListener('click', function() {
+    copyText(abCmd.textContent);
+  });
+
+  abBtnA.addEventListener('click', function() {
+    if (!ctx) return;
+    ctx.currentMasterV = ctx.slotA;
+    copyText(getCmd(ctx.slotA));
+    syncUI();
+  });
+
+  abBtnB.addEventListener('click', function() {
+    if (!ctx) return;
+    ctx.currentMasterV = ctx.slotB;
+    copyText(getCmd(ctx.slotB));
+    syncUI();
+  });
+
+  abSelectA.addEventListener('change', function() {
+    if (!ctx) return;
+    ctx.slotA = parseInt(abSelectA.value, 10);
+    syncUI();
+  });
+
+  abSelectB.addEventListener('change', function() {
+    if (!ctx) return;
+    ctx.slotB = parseInt(abSelectB.value, 10);
+    syncUI();
+  });
+
+  abModes.forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      if (!ctx) return;
+      ctx.mode = btn.dataset.mode;
+      syncUI();
+    });
+  });
+
+  // 划卷滑块拖动
+  var isSliderDragging = false;
+  function updateSliderPos(clientX) {
+    if (!sliderWrap) return;
+    var rect = sliderWrap.getBoundingClientRect();
+    var x = clientX - rect.left;
+    var pct = Math.max(0, Math.min(100, (x / rect.width) * 100));
+    sliderWrap.style.setProperty('--pos', pct);
+  }
+  if (sliderWrap) {
+    sliderWrap.addEventListener('mousedown', function(e) { isSliderDragging = true; updateSliderPos(e.clientX); });
+    window.addEventListener('mousemove', function(e) { if (isSliderDragging) updateSliderPos(e.clientX); });
+    window.addEventListener('mouseup', function() { isSliderDragging = false; });
+    sliderWrap.addEventListener('touchstart', function(e) { if (e.touches[0]) { isSliderDragging = true; updateSliderPos(e.touches[0].clientX); } }, { passive: true });
+    window.addEventListener('touchmove', function(e) { if (isSliderDragging && e.touches[0]) updateSliderPos(e.touches[0].clientX); }, { passive: true });
+    window.addEventListener('touchend', function() { isSliderDragging = false; });
+  }
+
+  // 键盘快捷键
+  document.addEventListener('keydown', function(e) {
+    if (!abModal || !abModal.classList.contains('rp-on')) return;
+    if (e.key === 'Escape') {
+      abModal.classList.remove('rp-on');
+      abModal.setAttribute('aria-hidden', 'true');
+    } else if (e.key === '1') {
+      ctx.mode = 'split';
+      syncUI();
+    } else if (e.key === '2') {
+      ctx.mode = 'slider';
+      syncUI();
+    } else if (e.key === '3') {
+      ctx.mode = 'single';
+      syncUI();
+    } else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      if (!ctx || !ctx.versions || !ctx.versions.length) return;
+      var idx = ctx.versions.findIndex(function(v) { return v.v === ctx.slotB; });
+      if (idx >= 0) {
+        var nextIdx = e.key === 'ArrowRight'
+          ? (idx + 1) % ctx.versions.length
+          : (idx - 1 + ctx.versions.length) % ctx.versions.length;
+        ctx.slotB = ctx.versions[nextIdx].v;
+        syncUI();
+      }
+    }
+  });
+
+  abClose.addEventListener('click', function() {
+    abModal.classList.remove('rp-on');
+    abModal.setAttribute('aria-hidden', 'true');
+  });
+  abModal.addEventListener('click', function(e) {
+    if (e.target === abModal) {
+      abModal.classList.remove('rp-on');
+      abModal.setAttribute('aria-hidden', 'true');
+    }
+  });
+
+  // 全局捕获相册与对比点击
+  document.addEventListener('click', function(e) {
+    if (e.target.closest('#rp-ab-modal')) return;
+    var trigger = e.target.closest('[data-ab-versions]');
+    if (!trigger) {
+      var container = e.target.closest('.rp-ab-open, .rp-ab-pill, .bust, .cell, .full, figure.plate, .plate, button.zoom');
+      if (container) {
+        trigger = container.dataset.abVersions ? container : (container.querySelector('[data-ab-versions]') || (container.parentElement ? container.parentElement.querySelector('[data-ab-versions]') : null));
+      }
+    }
+    if (trigger && trigger.dataset.abVersions) {
+      try {
+        var raw = trigger.dataset.abVersions;
+        var vers = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (Array.isArray(vers) && (vers.length > 1 || trigger.classList.contains('rp-ab-open') || trigger.classList.contains('rp-ab-pill'))) {
+          e.preventDefault();
+          e.stopPropagation();
+          vers.sort(function(a, b) { return a.v - b.v; });
+          var curMaster = parseInt(trigger.dataset.abCurrent || '1', 10);
+          var slotA = vers[0].v;
+          var slotB = vers.length > 1
+            ? (curMaster !== vers[0].v ? curMaster : vers[1].v)
+            : vers[0].v;
+          ctx = {
+            title: trigger.dataset.abTitle || '资产对比',
+            assetType: trigger.dataset.abType || 'refs',
+            assetPath: trigger.dataset.abAsset || '',
+            view: trigger.dataset.abView || '',
+            outfit: trigger.dataset.abOutfit || 'default',
+            itemId: trigger.dataset.abItemId || '',
+            currentMasterV: curMaster,
+            versions: vers,
+            slotA: slotA,
+            slotB: slotB,
+            mode: vers.length > 1 ? 'split' : 'single',
+          };
+          syncUI();
+          abModal.classList.add('rp-on');
+          abModal.setAttribute('aria-hidden', 'false');
+          return;
+        }
+      } catch (err) {
+        console.error('打开变体评审失败', err);
+      }
+    }
+  }, true);
 })();
 </script>
 ${panes.map((p) => (p.js ? `<script>\n${p.js}\n</script>` : '')).filter(Boolean).join('\n')}
@@ -610,7 +1237,7 @@ function main(argv) {
       const assetFiles = Array.isArray(jsonPath) ? jsonPath : [jsonPath];
       args = ['render', ...assetFiles, '--lang', lang];
       fromDir = from ? resolve(from, p.dir) : dirname(assetFiles[0]);
-      cwd = outDir;
+      cwd = fromDir;
     } else {
       args = ['render', jsonPath, '--html', '--lang', lang];
       fromDir = dirname(jsonPath);

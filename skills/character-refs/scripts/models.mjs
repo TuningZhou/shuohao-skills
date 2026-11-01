@@ -1,12 +1,13 @@
-// 出图适配层：Qwen（远程 ComfyUI）、GPT（本机 codex 内置 $imagegen）、OpenAI Images API（GPT Image 2）、自定义命令模板。
+// 出图适配层：Qwen（远程 ComfyUI）、GPT（本机 codex 内置 $imagegen）、Antigravity（本机 agy 内置 gemini-3.1-flash-image）、OpenAI Images API（GPT Image 2）、Google Gemini（gemini-3.1-flash-image）、自定义命令模板。
 // 每个适配器只做一件事：给定 {text, negative, ratio, refs[文件路径], seed}，返回 PNG 字节。
 // 凭据只从环境变量或配置里指定的 .env 文件读，从不打印。
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isPng } from './png.mjs';
 
 const IS_WIN = process.platform === 'win32';
 
@@ -24,7 +25,7 @@ export const SKILL_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const CONFIG_PATH = process.env.CHARACTER_REFS_CONFIG || join(SKILL_DIR, 'config.local.json');   // 环境变量只给自测用
 
 export const DEFAULT_CONFIG = {
-  anchorModel: null,          // 主图（锚点）用哪个模型：qwen / codex / openai / custom:<名字>
+  anchorModel: null,          // 主图（锚点）用哪个模型：qwen / codex / antigravity / openai / gemini / custom:<名字>
   deriveModel: null,          // 派生图用哪个模型；初次设置时与 anchorModel 相同，可以单独改
   confirmAnchor: null,        // 出完锚点是否停下来等人确认；初次运行时由用户决定
   models: {
@@ -36,11 +37,19 @@ export const DEFAULT_CONFIG = {
       steps: 20, cfg: 2.5, shift: 3.1,
     },
     codex: { bin: null },     // 不给就自动找本机版本最高的 codex
+    antigravity: { bin: null }, // 不给就自动找本机版本最高的 agy（Antigravity CLI），免 API key
     openai: {                 // OpenAI Images API（GPT Image 2）；也可指向兼容 OpenAI 格式的中转
       envFile: null,          // 可选：从这个 .env 读 OPENAI_API_KEY（与 OPENAI_BASE_URL）
       baseUrl: 'https://api.openai.com/v1',
       model: 'gpt-image-2',
       quality: 'high',        // 认脸敏感的编辑官方建议 high
+    },
+    gemini: {                 // Google Gemini API（gemini-3.1-flash-image / Nano Banana）
+      envFile: null,          // 可选：从这个 .env 读 GEMINI_API_KEY 或 GOOGLE_API_KEY
+      apiKey: null,           // 可选：直接配置 API Key
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+      model: 'gemini-3.1-flash-image', // 默认 gemini-3.1-flash-image，也可设 gemini-nano-banana-2.1 或 gemini-3-pro-image
+      api: 'interactions',    // 'interactions'（默认现代 API）或 'generateContent'（经典 API / 中转）
     },
     custom: {},               // { 名字: { cmd: "mytool --prompt-file {prompt_file} --ref {refs} --out {out} --size {width}x{height}" } }
   },
@@ -53,7 +62,9 @@ export function loadConfig(path = CONFIG_PATH) {
     models: {
       qwen: { ...DEFAULT_CONFIG.models.qwen, ...(raw.models?.qwen ?? {}) },
       codex: { ...DEFAULT_CONFIG.models.codex, ...(raw.models?.codex ?? {}) },
+      antigravity: { ...DEFAULT_CONFIG.models.antigravity, ...(raw.models?.antigravity ?? {}) },
       openai: { ...DEFAULT_CONFIG.models.openai, ...(raw.models?.openai ?? {}) },
+      gemini: { ...DEFAULT_CONFIG.models.gemini, ...(raw.models?.gemini ?? {}) },
       custom: { ...(raw.models?.custom ?? {}) },
     },
   };
@@ -70,16 +81,17 @@ export function configMissing(cfg) {
 }
 
 export function modelKind(name) {
-  if (name === 'qwen' || name === 'codex' || name === 'openai') return name;
+  if (name === 'qwen' || name === 'codex' || name === 'antigravity' || name === 'openai' || name === 'gemini') return name;
+  if (name === 'agy') return 'antigravity';
   if (/^custom:[\w-]+$/.test(String(name))) return 'custom';
-  throw new Error(`不认识的模型 ${name}（可用：qwen / codex / openai / custom:<名字>）`);
+  throw new Error(`不认识的模型 ${name}（可用：qwen / codex / antigravity / openai / gemini / custom:<名字>）`);
 }
 
 /* ------------------------------------------------------------------ */
 /* Qwen · 远程 ComfyUI                                                   */
 /* ------------------------------------------------------------------ */
-// 尺寸都是 16 的倍数、约 1.6–1.8 百万像素（Qwen Image 的舒适区），比例严格等于 2:3 / 4:5 / 1:1
-export const QWEN_SIZES = { '2:3': [1056, 1584], '4:5': [1152, 1440], '1:1': [1328, 1328] };
+// 尺寸都是 16 的倍数、约 1.3–1.8 百万像素（Qwen Image 的舒适区），比例严格等于 2:3 / 4:5 / 1:1 / 16:9
+export const QWEN_SIZES = { '2:3': [1056, 1584], '4:5': [1152, 1440], '1:1': [1328, 1328], '16:9': [1536, 864] };
 
 export function parseEnv(text) {
   const env = {};
@@ -233,6 +245,87 @@ export function codexGenerate(job, cfg) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Antigravity · 本机 agy CLI 内置出图 (gemini-3.1-flash-image)         */
+/* ------------------------------------------------------------------ */
+// 不需要 API key，吃 Google Antigravity / Gemini 订阅额度。
+// 类似 codex，调用本机 agy 执行生成，参考图与提示词通过参数和文件传入。
+
+export function findAgy(explicit = null) {
+  if (explicit) return explicit;
+  const home = homedir();
+  const discovered = IS_WIN
+    ? (spawnSync('where.exe', ['agy'], { encoding: 'utf8' }).stdout ?? '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+    : [(spawnSync('sh', ['-c', 'command -v agy'], { encoding: 'utf8' }).stdout ?? '').trim()].filter(Boolean);
+  const cands = [
+    ...discovered,
+    `${home}/.local/bin/agy`,
+    `${home}/.gemini/bin/agy`,
+    '/opt/homebrew/bin/agy',
+    '/usr/local/bin/agy',
+    `${home}/.local/bin/agy.bin`,
+  ];
+  let best = null;
+  for (const c of new Set(cands.filter(Boolean))) {
+    if (!existsSync(c)) continue;
+    best = c;
+    break;
+  }
+  if (!best) throw new Error('找不到 agy——请确保已安装 Google Antigravity CLI，或在配置里写 models.antigravity.bin');
+  return best;
+}
+
+export function antigravityStdin(job) {
+  const ratioLine = { '2:3': 'Portrait orientation, 2:3 aspect ratio.', '4:5': 'Portrait orientation, 4:5 aspect ratio.', '1:1': 'Square 1:1 aspect ratio.' }[job.ratio];
+  const note = job.refs.length > 1
+    ? `The attached images are references: image 1 is the full outfit, image 2 is a close-up of the face; they are the same person.`
+    : job.refs.length ? 'The attached image is the reference image.' : '';
+  return [
+    'Use the built-in image generator (gemini-3.1-flash-image) to generate exactly one image with the built-in image generator, ' +
+    'then copy the final PNG to ./out.png in the current working directory. Reply with only the file path — no base64, no markdown image preview.',
+    note,
+    `${job.text} ${ratioLine} Avoid: ${job.negative}.`,
+  ].filter(Boolean).join('\n\n');
+}
+
+export function antigravityGenerate(job, cfg) {
+  const bin = findAgy(cfg.models?.antigravity?.bin);
+  const dir = mkdtempSync(join(tmpdir(), 'character-refs-'));
+  try {
+    for (let i = 0; i < job.refs.length; i++) {
+      const dest = join(dir, `ref-${i + 1}.png`);
+      writeFileSync(dest, readFileSync(job.refs[i]));
+    }
+    const input = antigravityStdin(job);
+    const args = ['--dangerously-skip-permissions', '-p', input];
+    const r = runProgram(bin, args, {
+      cwd: dir,
+      input,
+      encoding: 'utf8',
+      timeout: 15 * 60_000,
+      env: { ...process.env, NODE_OPTIONS: '' },
+      maxBuffer: 64 * 2 ** 20,
+    });
+    const out = join(dir, 'out.png');
+    if (existsSync(out)) return ensurePng(readFileSync(out));
+
+    const entries = readdirSync(dir).filter((f) => !f.startsWith('ref-'));
+    const imgFile = entries.find((f) => /\.(png|jpe?g|webp)$/i.test(f));
+    if (imgFile) return ensurePng(readFileSync(join(dir, imgFile)));
+
+    const log = `${r.stdout ?? ''}\n${r.stderr ?? ''}`;
+    if (/quota|usage limit|usage_limit|rate limit|RESOURCE_EXHAUSTED/i.test(log)) {
+      throw new Error('Antigravity 出图额度用完了（Google 订阅额度），过几小时再试或换模型');
+    }
+    if (/401|unauthorized|not logged in|login required/i.test(log)) {
+      throw new Error('Antigravity 登录失效，运行 agy 重新登录');
+    }
+    throw new Error(`Antigravity 没有产出图片（退出码 ${r.status}）`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* GPT Image · OpenAI Images API                                         */
 /* ------------------------------------------------------------------ */
 // 锚点走 /images/generations，派生图走 /images/edits（参考图用 image[] 逐张附上，gpt-image 最多 16 张）。
@@ -273,6 +366,207 @@ export async function openaiGenerate(job, cfg) {
   const b64 = body?.data?.[0]?.b64_json;
   if (!b64) throw new Error('GPT Image 接口没有返回图片（data[0].b64_json）');
   return Buffer.from(b64, 'base64');
+}
+
+/* ------------------------------------------------------------------ */
+/* Gemini · Google Gemini API (gemini-3.1-flash-image)                */
+/* ------------------------------------------------------------------ */
+// 支持现代 Interactions API 与经典 generateContent API。
+// 尺寸支持 2:3、4:5、1:1。多张参考图以 base64 inlineData / image content 传入。
+// 若接口返回 JPEG 等格式，自动转为 PNG 字节以符合后续质检门规范。
+
+export function geminiEndpoint(gcfg, env = process.env) {
+  const file = gcfg.envFile ? parseEnv(readFileSync(resolve(gcfg.envFile.replace(/^~/, homedir())), 'utf8')) : {};
+  const pick = (k) => env[k] || file[k] || '';
+  const key = pick('GEMINI_API_KEY') || pick('GOOGLE_API_KEY') || gcfg.apiKey || '';
+  if (!key) throw new Error('Gemini 没有 API key：设 GEMINI_API_KEY 或 GOOGLE_API_KEY 环境变量，或在配置里给 models.gemini.envFile / apiKey');
+  const base = (pick('GEMINI_BASE_URL') || gcfg.baseUrl || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/+$/, '');
+  const model = gcfg.model || 'gemini-3.1-flash-image';
+  const api = gcfg.api || (base.includes('generateContent') ? 'generateContent' : 'interactions');
+  return { base, key, model, api };
+}
+
+export function geminiRequest(job, gcfg) {
+  const prompt = job.negative ? `${job.text} Avoid: ${job.negative}.` : job.text;
+  const isGenerateContent = gcfg.api === 'generateContent' || (gcfg.baseUrl && gcfg.baseUrl.includes('generateContent'));
+  const model = gcfg.model || 'gemini-3.1-flash-image';
+
+  if (isGenerateContent) {
+    const parts = [{ text: prompt }];
+    for (const ref of job.refs) {
+      parts.push({
+        inlineData: {
+          mimeType: 'image/png',
+          data: readFileSync(ref).toString('base64'),
+        },
+      });
+    }
+    return {
+      api: 'generateContent',
+      path: `/models/${model}:generateContent`,
+      headers: { 'Content-Type': 'application/json' },
+      body: {
+        contents: [{ parts }],
+        generationConfig: {
+          responseModalities: ['IMAGE'],
+          imageConfig: {
+            aspectRatio: job.ratio,
+            imageSize: '1K',
+          },
+        },
+      },
+    };
+  }
+
+  const input = [{ type: 'text', text: prompt }];
+  for (const ref of job.refs) {
+    input.push({
+      type: 'image',
+      mime_type: 'image/png',
+      data: readFileSync(ref).toString('base64'),
+    });
+  }
+  return {
+    api: 'interactions',
+    path: '/interactions',
+    headers: {
+      'Content-Type': 'application/json',
+      'Api-Revision': '2026-05-20',
+    },
+    body: {
+      model,
+      input,
+      response_format: [
+        {
+          type: 'image',
+          aspect_ratio: job.ratio,
+          image_size: '1k',
+          mime_type: 'image/png',
+        },
+      ],
+    },
+  };
+}
+
+export function extractGeminiImage(body) {
+  // 1. Interactions API response steps
+  if (Array.isArray(body?.steps)) {
+    for (const step of body.steps) {
+      if (step.type === 'model_output' && Array.isArray(step.content)) {
+        for (const item of step.content) {
+          if (item.type === 'image' && item.data) {
+            return Buffer.from(item.data, 'base64');
+          }
+        }
+      }
+    }
+  }
+
+  // 2. output_image convenience helper
+  if (body?.output_image?.data) {
+    return Buffer.from(body.output_image.data, 'base64');
+  }
+
+  // 3. Classic generateContent response format
+  if (Array.isArray(body?.candidates)) {
+    for (const cand of body.candidates) {
+      if (Array.isArray(cand?.content?.parts)) {
+        for (const part of cand.content.parts) {
+          if (part.inlineData?.data) {
+            return Buffer.from(part.inlineData.data, 'base64');
+          }
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+export function ensurePng(buf) {
+  if (isPng(buf)) return buf;
+  const dir = mkdtempSync(join(tmpdir(), 'char-convert-'));
+  const inPath = join(dir, 'input.bin');
+  const outPath = join(dir, 'output.png');
+  try {
+    writeFileSync(inPath, buf);
+    if (process.platform === 'darwin') {
+      const r = spawnSync('/usr/bin/sips', ['-s', 'format', 'png', inPath, '--out', outPath]);
+      if (r.status === 0 && existsSync(outPath)) return readFileSync(outPath);
+    }
+    const py = `import sys\ntry:\n from PIL import Image\n Image.open(sys.argv[1]).save(sys.argv[2], format='PNG')\n sys.exit(0)\nexcept Exception:\n sys.exit(1)`;
+    const rPy = spawnSync('python3', ['-c', py, inPath, outPath]);
+    if (rPy.status === 0 && existsSync(outPath)) return readFileSync(outPath);
+    spawnSync('magick', [inPath, outPath]);
+    if (existsSync(outPath)) return readFileSync(outPath);
+    spawnSync('ffmpeg', ['-y', '-i', inPath, outPath]);
+    if (existsSync(outPath)) return readFileSync(outPath);
+  } catch {
+    // 转换失败则原样返回
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  return buf;
+}
+
+export async function geminiGenerate(job, cfg) {
+  const gcfg = cfg.models.gemini;
+  const ep = geminiEndpoint(gcfg);
+  let req = geminiRequest(job, gcfg);
+
+  async function postReq(r) {
+    const url = `${ep.base}${r.path}?key=${encodeURIComponent(ep.key)}`;
+    const headers = {
+      'x-goog-api-key': ep.key,
+      ...r.headers,
+    };
+    return fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(r.body),
+      signal: AbortSignal.timeout(10 * 60_000),
+    });
+  }
+
+  let res;
+  let lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      res = await postReq(req);
+      if (res.status === 404 && req.api === 'interactions') {
+        const altReq = geminiRequest(job, { ...gcfg, api: 'generateContent' });
+        const altRes = await postReq(altReq);
+        if (altRes.ok || altRes.status !== 404) {
+          req = altReq;
+          res = altRes;
+        }
+      }
+      if (res.ok) break;
+      if (res.status === 429 || res.status >= 500) {
+        lastErr = new Error(`HTTP ${res.status}`);
+        await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+        continue;
+      }
+      break;
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+    }
+  }
+
+  if (!res) throw lastErr || new Error('Gemini 请求网络异常');
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data?.error?.message || data?.message || `HTTP ${res.status}`;
+    throw new Error(`Gemini 接口返回 ${res.status}：${msg}`);
+  }
+
+  const rawBytes = extractGeminiImage(data);
+  if (!rawBytes) {
+    throw new Error('Gemini 接口没有返回图片数据');
+  }
+
+  return ensurePng(rawBytes);
 }
 
 /* ------------------------------------------------------------------ */
@@ -333,7 +627,9 @@ export async function generate(model, job, cfg) {
   const kind = modelKind(model);
   if (kind === 'qwen') return qwenGenerate(job, cfg);
   if (kind === 'codex') return codexGenerate(job, cfg);
+  if (kind === 'antigravity') return antigravityGenerate(job, cfg);
   if (kind === 'openai') return openaiGenerate(job, cfg);
+  if (kind === 'gemini') return geminiGenerate(job, cfg);
   return customGenerate(job, cfg, model.slice('custom:'.length));
 }
 
@@ -341,5 +637,7 @@ export async function generate(model, job, cfg) {
 export function maskConfig(cfg) {
   const c = JSON.parse(JSON.stringify(cfg));
   if (c.models?.qwen?.pass) c.models.qwen.pass = '（已隐藏）';
+  if (c.models?.openai?.apiKey) c.models.openai.apiKey = '（已隐藏）';
+  if (c.models?.gemini?.apiKey) c.models.gemini.apiKey = '（已隐藏）';
   return c;
 }

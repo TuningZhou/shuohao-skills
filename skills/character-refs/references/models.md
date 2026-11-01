@@ -1,9 +1,9 @@
 # 出图模型
 
-四种，在 `config` 里选。主图（锚点）和派生图可以分开设，重出单张可以使用 `gen --model` 临时换。
+六种，在 `config` 里选。主图（锚点）和派生图可以分开设，重出单张可以使用 `gen --model` 临时换。
 适配器都在 `scripts/models.mjs`，统一接口：给 `{text, negative, ratio, refs[文件路径], seed}`，返回 PNG 字节。
 
-尺寸三档（四个模型通用，都满足 gpt-image-2 的尺寸规则，也都落在视频模型参考图的交集里）：
+尺寸三档（模型通用，都满足尺寸规则，也都落在视频模型参考图的交集里）：
 
 | 比例 | 尺寸 | 用在 |
 | --- | --- | --- |
@@ -34,6 +34,14 @@
 - **出的是透明背景 PNG**（看图软件显示成白底，实际是透明的黑）。存盘前自动铺成白底，记录里留注——视频模型拿到透明图怎么处理背景说不准
 - 实测：角度最准（45° 更接近 45°），细节图材质最好
 
+## antigravity（或 agy） —— 本机 Antigravity CLI 内置出图（gemini-3.1-flash-image）
+
+- 调本机 `agy` CLI，参考图与提示词通过参数和文件挂上；自动发现本机安装的 `agy`，也可 `--antigravity-bin` 指定
+- **不要 API key，吃 Google Antigravity / Gemini 订阅额度**（与 codex 类似，依赖已登录的本机 agy 环境）
+- 内置 `gemini-3.1-flash-image`，尺寸写进提示词；由 Antigravity 自动化执行出图并导出至本地
+- 若接口返回非 PNG（如 JPEG/WebP），自动转为无损标准白底 PNG，无缝接入后续质检门
+- 实测：与 Google 官方生态原生融合，免配置 Key，适合在 Antigravity 终端中直接免密出图
+
 ## openai —— OpenAI Images API（GPT Image 2）
 
 - key：`OPENAI_API_KEY`，放环境变量或 `config --openai-env-file <.env>`；接口地址默认 `https://api.openai.com/v1`，
@@ -44,6 +52,14 @@
 - 换成 `gpt-image-1` 系列会传 `input_fidelity=high`，但它们只支持 1024×1024 / 1024×1536 / 1536×1024，
   本 skill 的尺寸会被接口拒掉——只用 gpt-image-2
 - **只使用本地假服务器验过请求格式，没有使用真 key 跑过**。第一次使用先出一张锚点确认
+
+## gemini —— Google Gemini API（gemini-3.1-flash-image）
+
+- 连接：`GEMINI_API_KEY` 或 `GOOGLE_API_KEY`，放环境变量或 `config --gemini-env-file <.env>`（也可 `config --gemini-api-key <key>`）。接口地址默认 `https://generativelanguage.googleapis.com/v1beta`，中转/代理使用 `--gemini-base-url`
+- 模型：默认 `gemini-3.1-flash-image`（Antigravity / Google AI 原生环境自带，高速多模态出图），也可配置 `gemini-nano-banana-2.1` 或 `gemini-3-pro-image`
+- 模式：默认现代 Interactions API（`POST /interactions`）；若中转仅兼容经典接口，可设 `--gemini-api generateContent`（端点自动兼容回退）
+- 锚点直接以多模态文本请求生成；派生图将参考图转为 Base64 inlineData，利用原生多图融合能力保持极高角色一致性
+- 尺寸原生支持 `2:3`、`4:5`、`1:1` 宽高比；若接口返回 JPEG/WebP，适配层自动转为无损标准白底 PNG，无缝接入后续质检门
 
 ## custom:<名字> —— 自定义命令
 

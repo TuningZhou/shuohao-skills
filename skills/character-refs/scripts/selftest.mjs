@@ -14,10 +14,12 @@ import { chunks, crc32, decode, flattenAlpha, pngInfo, readText, solidPng, withT
 import { deflateSync } from 'node:zlib';
 import {
   ANCHOR, DEFAULT_LOOK, allViews, anchorUsable, assetFromIntake, buildPrompt, confirmTable, current, defaultSkin, gates,
-  intakeProblems, nounOf, resolveLayers, pronouns, recordVersion, resolveRefs, staleReasons, viewsOfTier,
+  intakeProblems, nounOf, resolveLayers, pronouns, recordVersion, resolveRefs, selectVersion, staleReasons, viewsOfTier,
 } from './core.mjs';
 import {
   QWEN_SIZES, codexStdin, configMissing, fillTemplate, loadConfig, maskConfig, modelKind, openaiGenerate, openaiRequest,
+  geminiEndpoint, geminiGenerate, geminiRequest, extractGeminiImage, ensurePng,
+  antigravityStdin, antigravityGenerate, findAgy,
   parseEnv, quoteShellArg, qwenEndpoint, qwenGenerate, qwenWorkflow,
 } from './models.mjs';
 import { renderHtml, safeName } from './character-refs.mjs';
@@ -290,6 +292,25 @@ eq(nounOf(16, 'female'), 'young woman', '十六岁女性叫 young woman');
   eq(staleReasons(a, O, 'detail-sleeve').length, 0, '重出大头照 → 只挂锚点的细节不受影响');
   eq(staleReasons(a, O, 'side-full').length, 0, '重出大头照 → 侧面不受影响');
   eq(a.outfits[O].views['face-front'].versions.length, 2, '重出不删旧版');
+  {
+    const sel = selectVersion(a, O, 'face-front', 1);
+    eq(sel.v, 1, 'selectVersion 选回 v1');
+    eq(a.outfits[O].views['face-front'].current, 1, 'current 指针切回 1');
+    eq(staleReasons(a, O, 'detail-hair').length, 0, '切回参考的旧版本后，依赖该版本的细节图恢复有效');
+    selectVersion(a, O, 'face-front', 'v2');
+    eq(a.outfits[O].views['face-front'].current, 2, 'selectVersion 支持 "v2" 字符串传参');
+    assert.throws(() => selectVersion(a, O, 'face-front', 99), /找不到版本 v99/); passed++;
+    assert.throws(() => selectVersion(a, O, 'face-front', 'bad'), /无效的版本号/); passed++;
+    assert.throws(() => selectVersion(a, O, 'nonexistent-view', 1), /还没有生成过任何版本/); passed++;
+    assert.throws(() => selectVersion(a, 'nonexistent-outfit', 'face-front', 1), /没有造型/); passed++;
+
+    const patchedVer = recordVersion(a, O, 'face-front', {
+      buf: solidPng(396, 495), model: 'qwen', prompt: buildPrompt(a, O, 'face-front'), patch: ' wearing spectacles ', refs: []
+    }).version;
+    eq(patchedVer.patch, 'wearing spectacles', 'recordVersion 记录 patch 自动去掉首尾空白');
+    eq(patchedVer.v, 3, '新版本编号为 v3');
+    selectVersion(a, O, 'face-front', 2);
+  }
   add(ANCHOR);         // 重出锚点
   ok(['face-front', 'side-full', 'back-full', 'detail-sleeve'].every((v) => staleReasons(a, O, v).length), '重出锚点 → 其余全部过期');
   eq(anchorUsable(a, O).ok, false, '重出的锚点要重新确认');
@@ -345,10 +366,25 @@ eq(nounOf(16, 'female'), 'young woman', '十六岁女性叫 young woman');
     'Windows 参数转义环境变量、换行、命令分隔符与双引号，提示词不能逃出参数边界');
   assert.throws(() => quoteShellArg('x\0y', 'win32'), /NUL/); passed++;
   assert.throws(() => modelKind('midjourney'), /不认识/); passed++;
+  eq(modelKind('gemini'), 'gemini', 'Gemini 模型');
+  eq(modelKind('antigravity'), 'antigravity', 'Antigravity 模型');
+  eq(modelKind('agy'), 'antigravity', 'Antigravity 简写 agy 别名');
   eq(modelKind('custom:mine'), 'custom', '自定义模型');
+  const agyIn = antigravityStdin({ text: 'T', negative: 'N', ratio: '2:3', refs: ['/tmp/r1.png', '/tmp/r2.png'] });
+  ok(agyIn.includes('2:3 aspect ratio') && agyIn.includes('image 2 is a close-up') && agyIn.includes('./out.png') && agyIn.includes('Avoid: N.'), 'Antigravity：比例与参考图写进提示词');
+  eq(findAgy('/custom/bin/agy'), '/custom/bin/agy', 'Antigravity：显式指定 bin');
+  const gReq = geminiRequest({ text: 'T', negative: 'N', ratio: '2:3', refs: [] }, { model: 'gemini-3.1-flash-image' });
+  ok(gReq.path === '/interactions' && gReq.body.model === 'gemini-3.1-flash-image' && gReq.body.input[0].text === 'T Avoid: N.', 'Gemini：interactions 请求结构与提示词');
+  const gGenReq = geminiRequest({ text: 'T', negative: 'N', ratio: '2:3', refs: [] }, { model: 'gemini-3.1-flash-image', api: 'generateContent' });
+  ok(gGenReq.path.includes('generateContent') && gGenReq.body.contents[0].parts[0].text === 'T Avoid: N.', 'Gemini：generateContent 请求结构');
+  const dummyB64 = Buffer.from('abc').toString('base64');
+  eq(extractGeminiImage({ steps: [{ type: 'model_output', content: [{ type: 'image', data: dummyB64 }] }] })?.toString('utf8'), 'abc', 'Gemini：从 steps 解出图片');
+  eq(extractGeminiImage({ candidates: [{ content: { parts: [{ inlineData: { data: dummyB64 } }] } }] })?.toString('utf8'), 'abc', 'Gemini：从 candidates 解出图片');
+  eq(extractGeminiImage({ output_image: { data: dummyB64 } })?.toString('utf8'), 'abc', 'Gemini：从 output_image 解出图片');
   const c = loadConfig(join(TMP, 'none.json'));
   eq(configMissing(c).length, 3, '初次运行：模型、派生模型、是否确认三件事都要问');
   eq(maskConfig({ models: { qwen: { pass: 'x' } } }).models.qwen.pass, '（已隐藏）', '展示配置时密码打码');
+  eq(maskConfig({ models: { gemini: { apiKey: 'key123' } } }).models.gemini.apiKey, '（已隐藏）', '展示配置时 Gemini API Key 打码');
 }
 
 /* ---------------- 假服务器：Qwen / GPT Image ---------------- */
@@ -403,6 +439,54 @@ const serve = (handler) => new Promise((ok_) => {
   eq((seen.body.match(/name="image\[\]"/g) ?? []).length, 2, 'GPT Image：两张参考图作为 image[] 上传');
   ok(seen.body.includes('1152x1440'), 'GPT Image：尺寸按比例给');
 }
+{
+  const seen = {};
+  const img = solidPng(20, 25);
+  const srv = await serve((req, res, body) => {
+    seen.path = req.url;
+    seen.key = req.headers['x-goog-api-key'] || new URL(req.url, 'http://localhost').searchParams.get('key');
+    seen.body = JSON.parse(body.toString('utf8'));
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({
+      steps: [
+        {
+          type: 'model_output',
+          content: [
+            {
+              type: 'image',
+              mime_type: 'image/png',
+              data: img.toString('base64'),
+            },
+          ],
+        },
+      ],
+    }));
+  });
+  const cfg = loadConfig(join(TMP, 'none.json'));
+  cfg.models.gemini.baseUrl = `http://127.0.0.1:${srv.address().port}`;
+  process.env.GEMINI_API_KEY = 'gemini-key-test';
+  const f = join(TMP, 'ref.png');
+  const out = await geminiGenerate({ text: 'T', negative: 'N', ratio: '2:3', refs: [f] }, cfg);
+  delete process.env.GEMINI_API_KEY;
+  srv.close();
+  ok(out.equals(img), 'Gemini：成功拿回图片');
+  ok(seen.path.startsWith('/interactions') && seen.key === 'gemini-key-test', 'Gemini：interactions 路径与 API key 校验通过');
+  eq(seen.body.input.length, 2, 'Gemini：包含 1 个提示词与 1 个参考图');
+  eq(seen.body.response_format[0].aspect_ratio, '2:3', 'Gemini：指定 2:3 宽高比');
+}
+{
+  const fakeAgy = join(TMP, 'fake-agy.mjs');
+  const img = solidPng(20, 25);
+  writeFileSync(fakeAgy, `import { writeFileSync } from 'node:fs';\nimport { resolve } from 'node:path';\n` +
+    `writeFileSync(resolve('out.png'), Buffer.from('${img.toString('base64')}', 'base64'));\n`);
+  const fakeBin = join(TMP, 'fake-agy.sh');
+  writeFileSync(fakeBin, `#!/bin/sh\nnode "${fakeAgy}" "$@"\n`, { mode: 0o755 });
+  const cfg = loadConfig(join(TMP, 'none.json'));
+  cfg.models.antigravity = { bin: fakeBin };
+  const f = join(TMP, 'ref.png');
+  const out = antigravityGenerate({ text: 'T', negative: 'N', ratio: '2:3', refs: [f] }, cfg);
+  ok(out.equals(img), 'Antigravity：从 fake-agy 获取生成的图片');
+}
 
 /* ---------------- 完整流程（自定义命令模板造白底图） ---------------- */
 {
@@ -436,6 +520,38 @@ const serve = (handler) => new Promise((ok_) => {
   eq(readText(readFileSync(join(dirname(assetPath), cur.file)))['shuohao:id'], '阿禾/default/face-front/v2', '图片文件里写着标识');
   ok(existsSync(join(dirname(assetPath), 'default/face-front.v1.png')), '旧版文件还在');
   eq(asset.outfits.default.upgrades.at(-1).tier, 3, '升档记录留下');
+  {
+    const vAll = run('versions', assetPath);
+    ok(vAll.status === 0 && vAll.stdout.includes('face-front') && vAll.stdout.includes('* v2'), 'versions 列出视图与版本，当前定稿标记 *');
+    const vSingle = run('versions', assetPath, 'face-front');
+    ok(vSingle.status === 0 && vSingle.stdout.includes('v1') && vSingle.stdout.includes('* v2'), 'versions 可指定单独视图');
+
+    const sel1 = run('select', assetPath, 'face-front', '1');
+    ok(sel1.status === 0 && sel1.stdout.includes('当前定稿版本设为 v1'), 'select 命令将 face-front 切到 v1');
+    let aNow = JSON.parse(readFileSync(assetPath, 'utf8'));
+    eq(aNow.outfits.default.views['face-front'].current, 1, '磁盘上的 asset.json current 变为 1');
+    ok(run('check', assetPath).status === 0, '切回 v1 后细节图不再标为过期');
+
+    const sel2 = run('select', assetPath, 'face-front', '--version', 'v2');
+    ok(sel2.status === 0 && sel2.stdout.includes('当前定稿版本设为 v2'), 'select 支持 --version v2');
+    aNow = JSON.parse(readFileSync(assetPath, 'utf8'));
+    eq(aNow.outfits.default.views['face-front'].current, 2, '磁盘上的 asset.json current 恢复为 2');
+
+    const badSel = run('select', assetPath, 'face-front', 'v99');
+    ok(badSel.status !== 0 && badSel.stderr.includes('找不到版本'), 'select 无效版本时非零退出并报错');
+
+    const prPatch = run('prompt', assetPath, 'face-front', '--patch', 'wearing jade hairpins');
+    ok(prPatch.status === 0 && prPatch.stdout.includes('Variant modification: wearing jade hairpins.'), 'prompt 命令支持 --patch');
+
+    const genPatch = run('gen', assetPath, 'face-front', '--patch', 'wearing jade hairpins');
+    ok(genPatch.status === 0 && genPatch.stdout.includes('face-front/v3') && genPatch.stdout.includes('变体微调：wearing jade hairpins'), 'gen --patch 成功生成微调版本 v3');
+    aNow = JSON.parse(readFileSync(assetPath, 'utf8'));
+    const ver3 = aNow.outfits.default.views['face-front'].versions.find((x) => x.v === 3);
+    ok(ver3 && ver3.patch === 'wearing jade hairpins', 'asset.json 中记录 patch 字段');
+    ok(ver3.prompt.includes('Variant modification: wearing jade hairpins.'), '提示词中附带 Variant modification');
+
+    run('select', assetPath, 'face-front', '2');
+  }
   const out = join(TMP, 'report.html');
   ok(run('render', assetPath, '--out', out).status === 0, 'render 写出报告');
   const html = readFileSync(out, 'utf8');

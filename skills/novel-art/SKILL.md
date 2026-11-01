@@ -98,7 +98,27 @@ node {baseDir}/scripts/novel-art.mjs validate <art.json> --cast <cast.json>
 
 **有违规逐条修，改完重跑，直到通过。**
 
-### Step 4 — 输出与汇报
+### Step 4 — 资产化出图、变体微调与版本管理
+
+`novel-art` 支持通过公共模型层（`models.mjs`，支持 Qwen、codex、Antigravity/agy、OpenAI、Gemini 等）直接为场景和道具出图并沉淀为资产版本库：
+
+```bash
+# 1. 预览提示词（支持 --patch 变体微调）
+node {baseDir}/scripts/novel-art.mjs prompt <art.json> S01 sheet --patch "heavy winter snow"
+node {baseDir}/scripts/novel-art.mjs prompt <art.json> P01 sheet --patch "bloodstain on brass latch"
+
+# 2. 出图并自动记入版本（落地为 images/<slug>-<view>.v<v>.png 并记录入 views）
+node {baseDir}/scripts/novel-art.mjs gen <art.json> S01 sheet --model antigravity
+node {baseDir}/scripts/novel-art.mjs gen <art.json> S01 sheet --patch "heavy winter snow"
+
+# 3. 查看历史版本清单（* 标示当前定稿）
+node {baseDir}/scripts/novel-art.mjs versions <art.json> S01
+
+# 4. 任意切换定稿版本（支持 v1 或 1，切换后 render 自动显示该版本）
+node {baseDir}/scripts/novel-art.mjs select <art.json> S01 sheet 1
+```
+
+### Step 5 — 输出与汇报
 
 ```bash
 cd <输出目录>
@@ -106,21 +126,21 @@ node {baseDir}/scripts/novel-art.mjs render <剧名>-art.json --md   > <剧名>-
 node {baseDir}/scripts/novel-art.mjs render <剧名>-art.json --html > art-report.html
 ```
 
-报告界面默认中文；用户要英文界面就加 `--lang en`（或在 art.json 顶层写 `"lang": "en"`，`--lang` 优先）。`render` 默认去 art.json 同级的 `images/<slug>-sheet.png` 找图（场景和道具都找），图在别处就用 `--images <目录>` 指过去——**本 skill 不产生这些文件**，下游出完图重跑一次 render 就能嵌进报告。报告含：KPI 带、场景清单、场景设定卡、道具清单、道具设定卡（锚点核对表 / 状态变体 / 提示词包全带复制按钮）、质量门面板、导出 JSON（下载的就是 art.json 原样）。
+报告界面默认中文；用户要英文界面就加 `--lang en`（或在 art.json 顶层写 `"lang": "en"`，`--lang` 优先）。`render` 会优先读取 `views.sheet.current` 所选定的当前定稿文件，未设置时退回查找 `images/<slug>-sheet.png`。卡片上方会自动标出当前定稿版本号（如 `v1`）及变体微调记录。报告含：KPI 带、场景清单、场景设定卡、道具清单、道具设定卡（锚点核对表 / 状态变体 / 提示词包全带复制按钮）、质量门面板、导出 JSON。
 
 汇报一句话说清：几个场景（主场景/变体各几）、几件道具、锚点总数、报告路径；没过的门明说。
-
-**不要说「已出图」**——这一步不存在了，交付的是提示词。
 
 最终落地：
 
 ```
 <输出目录>/
-├── <剧名>-art.json
+├── <剧名>-art.json                ← 设定与版本资产记录
 ├── <剧名>-art.md
 ├── art-report.html                ← 双击就能开
-└── images/                        ← 本 skill 不写这个目录
-    └── <slug>-sheet.png           ← 下游出完图放这儿，render 会捡起来
+└── images/                        ← 设定图与历史版本存放目录
+    ├── <slug>-sheet.png           ← 当前激活设定图
+    ├── <slug>-sheet.v1.png        ← 历史版本 1
+    └── <slug>-sheet.v2.png        ← 变体版本 2
 ```
 
 ---
@@ -148,7 +168,7 @@ seed 吃 outline.json 的场景与道具两块（大纲没有 `props` 时道具�
 node {baseDir}/scripts/selftest.mjs
 ```
 
-151 项断言，不调模型、不花额度。10 道质量门每一道都有击穿用例。改完脚本先跑这个。
+189 项断言，不调模型、不花额度。10 道质量门每一道都有击穿用例，覆盖场景与道具提示词拼装、变体微调（--patch）、版本记录与切换（versions/select）。改完脚本先跑这个。
 
 ## 自带样例
 

@@ -83,6 +83,9 @@ node scripts/character-refs.mjs confirm out/阿禾/asset.json
 node scripts/character-refs.mjs gen out/阿禾/asset.json          # fill tier 2: headshot, profile, back
 node scripts/character-refs.mjs gen out/阿禾/asset.json --tier 3 --reason "hair accessory close-up in E03"
 node scripts/character-refs.mjs check out/阿禾/asset.json
+node scripts/character-refs.mjs gen out/阿禾/asset.json face-front --patch "wearing spectacles" # generate a patched variant
+node scripts/character-refs.mjs versions out/阿禾/asset.json face-front                           # list version history (* = active)
+node scripts/character-refs.mjs select out/阿禾/asset.json face-front 1                          # switch active version back to v1
 node scripts/character-refs.mjs render out/阿禾/asset.json --out out/character-refs.html
 ```
 
@@ -92,7 +95,7 @@ node scripts/character-refs.mjs render out/阿禾/asset.json --out out/character
 node scripts/selftest.mjs
 ```
 
-233 assertions, no model calls, no quota. The Qwen and GPT Image adapters are checked against local mock servers; the full pipeline runs end to end with a custom command that produces blank white images.
+271 assertions, no model calls, no quota. The Qwen, codex, Antigravity (agy), GPT Image, and Gemini adapters are checked against local mock servers and runners; the full pipeline runs end to end with a custom command that produces blank white images.
 
 ## Known limitations
 

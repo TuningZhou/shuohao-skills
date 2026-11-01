@@ -3,9 +3,116 @@
 // Zero dependencies on purpose: the skill must work in any directory
 // without an npm install. Node 18+ (stdlib only).
 
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { generate, loadConfig, modelKind } from '../../character-refs/scripts/models.mjs';
+
+/* ------------------------------------------------------------------ */
+/* 哈希与资产寻址                                                        */
+/* ------------------------------------------------------------------ */
+
+export const sha256 = (x) => createHash('sha256').update(x).digest('hex');
+
+export function findItem(doc, query) {
+  if (!doc || !query) return null;
+  const q = String(query).trim().toLowerCase();
+  const all = [...(doc.scenes ?? []), ...(doc.props ?? [])];
+  return (
+    all.find(
+      (item) =>
+        item.id?.toLowerCase() === q ||
+        slug(item.name).toLowerCase() === q ||
+        item.name?.trim().toLowerCase() === q ||
+        item.slug?.toLowerCase() === q,
+    ) || null
+  );
+}
+
+export function itemViews(item) {
+  if (!item) return {};
+  const isProp = item.id?.startsWith('P');
+  const views = {
+    sheet: { label: isProp ? '设定图（白底无手）' : '设定图（空景宽幅）', ratio: isProp ? '1:1' : '16:9' },
+    master: { label: '主视角', ratio: isProp ? '1:1' : '16:9' },
+  };
+  if (!isProp && Array.isArray(item.lighting)) {
+    for (const l of item.lighting) {
+      views[`light-${l.state}`] = { label: `光照 · ${l.state}`, ratio: '16:9', lighting: l };
+    }
+  }
+  if (isProp && Array.isArray(item.states)) {
+    for (const st of item.states) {
+      views[`state-${st.state}`] = { label: `状态 · ${st.state}`, ratio: '1:1', state: st };
+    }
+  }
+  return views;
+}
+
+export function buildItemPrompt(item, view = 'sheet', patch = null) {
+  const isProp = item.id?.startsWith('P');
+  const vInfo = itemViews(item)[view];
+  if (!vInfo) throw new Error(`在 ${item.name}（${item.id}）中未找到视图 ${view}。可用视图：${Object.keys(itemViews(item)).join('、')}`);
+
+  let text = '';
+  let negative = item.image?.negativePrompt || '';
+  let ratio = vInfo.ratio || (isProp ? '1:1' : '16:9');
+
+  if (view === 'sheet') {
+    text = item.image?.sheet || item.image?.prompt || '';
+  } else if (view === 'master') {
+    text = item.image?.prompt || '';
+  } else if (view.startsWith('light-')) {
+    const l = vInfo.lighting;
+    text = `${item.image?.prompt || ''} Lighting and atmosphere: ${l.prompt}.`;
+  } else if (view.startsWith('state-')) {
+    const st = vInfo.state;
+    text = `${item.image?.prompt || ''} Prop state: ${st.prompt}.`;
+  }
+
+  if (patch) {
+    const pText = String(patch).trim().replace(/\.?$/, '.');
+    text = `${text} Variant modification: ${pText}`;
+  }
+
+  return { text, negative, ratio, view };
+}
+
+export function recordVersion(doc, itemOrId, view, { buf = null, file = null, model = 'unknown', prompt = null, patch = null, now = new Date() } = {}) {
+  const item = typeof itemOrId === 'string' ? findItem(doc, itemOrId) : itemOrId;
+  if (!item) throw new Error(`未找到场景或道具：${itemOrId}`);
+  item.views ??= {};
+  const slot = (item.views[view] ??= { current: 0, versions: [] });
+  const v = Math.max(0, ...slot.versions.map((x) => x.v)) + 1;
+  const fileName = file || `images/${slug(item.name)}-${view}.v${v}.png`;
+  const hash = buf ? sha256(buf) : null;
+  const version = {
+    v,
+    file: fileName,
+    sha256: hash,
+    model,
+    prompt: typeof prompt === 'string' ? prompt : prompt?.text || null,
+    patch: patch ? String(patch).trim() : null,
+    createdAt: now.toISOString(),
+  };
+  slot.versions.push(version);
+  slot.current = v;
+  return { version };
+}
+
+export function selectVersion(doc, itemOrId, view, v) {
+  const item = typeof itemOrId === 'string' ? findItem(doc, itemOrId) : itemOrId;
+  if (!item) throw new Error(`未找到场景或道具：${itemOrId}`);
+  const slot = item.views?.[view];
+  if (!slot || !slot.versions?.length) throw new Error(`${item.name}（${item.id}）的视图 ${view} 还没有生成过任何版本`);
+  const targetV = parseInt(String(v).replace(/^v/i, ''), 10);
+  if (isNaN(targetV)) throw new Error(`无效的版本号：${v}，应为整数或 v数字（如 v1、v2）`);
+  const found = slot.versions.find((x) => x.v === targetV);
+  if (!found) throw new Error(`在 ${item.name}（${item.id}）的 ${view} 中找不到版本 v${targetV}。可用版本：${slot.versions.map((x) => `v${x.v}`).join('、')}`);
+  slot.current = targetV;
+  return found;
+}
 
 /* ------------------------------------------------------------------ */
 /* slug                                                                */
@@ -592,9 +699,28 @@ export function renderHtml(doc, lang = null) {
 
   const propCards = props
     .map((pr) => {
+      const sheetSlot = pr.views?.sheet;
+      const curVer = sheetSlot?.versions?.find((x) => x.v === sheetSlot.current);
+      const sheetVersions = sheetSlot?.versions || (pr.sheetImage ? [{ v: 1, file: pr.sheetImage, model: 'antigravity', createdAt: '' }] : []);
+      const verBadge = curVer ? `<span class="badge" title="当前定稿版本">v${curVer.v}</span>` : '';
+      const versForAttr = sheetVersions.map((x) => ({
+        v: x.v,
+        src: x.file,
+        model: x.model || '',
+        seed: x.seed ?? '',
+        patch: x.patch || '',
+        createdAt: x.createdAt || '',
+        gatesOk: true,
+        gatesText: '',
+        isCurrent: x.v === (curVer ? curVer.v : 1),
+      }));
+      const abBtn = sheetVersions.length > 1
+        ? `<button class="copy mini rp-ab-open" type="button" data-ab-type="art" data-ab-asset="${esc(doc.source ? `${doc.source}-art.json` : 'art.json')}" data-ab-item-id="${esc(pr.id)}" data-ab-view="sheet" data-ab-title="${esc(pr.id)} · ${esc(pr.name)} · 道具设定板" data-ab-current="${curVer ? curVer.v : 1}" data-ab-versions="${esc(JSON.stringify(versForAttr))}">变体(${sheetVersions.length})</button>`
+        : '';
+      const patchNote = curVer?.patch ? `<p class="variant">变体微调：<b>${esc(curVer.patch)}</b></p>` : '';
       const plate = pr.sheetImage
         ? `<figure class="plate">
-  <button class="zoom" data-src="${esc(pr.sheetImage)}" aria-label="${esc(t.zoomImage)}">
+  <button class="zoom" data-src="${esc(pr.sheetImage)}" aria-label="${esc(t.zoomImage)}" data-ab-type="art" data-ab-asset="${esc(doc.source ? `${doc.source}-art.json` : 'art.json')}" data-ab-item-id="${esc(pr.id)}" data-ab-view="sheet" data-ab-title="${esc(pr.id)} · ${esc(pr.name)} · 道具设定板" data-ab-current="${curVer ? curVer.v : 1}" data-ab-versions="${esc(JSON.stringify(versForAttr))}">
     <img src="${esc(pr.sheetImage)}" alt="${esc(pr.name)} ${esc(t.propSheetCaption)}" loading="lazy">
   </button>
   <figcaption>${esc(t.propSheetCaption)}</figcaption>
@@ -605,10 +731,12 @@ export function renderHtml(doc, lang = null) {
     <span class="sc-id">${esc(pr.id)}</span>
     <h3>${esc(pr.name)}</h3>
     <span class="badge">${esc(pr.scale)}</span>
+    ${verBadge}${abBtn}
     ${pr.usage?.episodes?.length ? `<span class="sc-use">${esc(t.usageTitle)} ${esc(pr.usage.episodes.join(t.listSep))}${pr.usage.beats?.length ? `${esc(t.pairSep)}${esc(t.beatsTitle)} ${esc(pr.usage.beats.join(' · '))}` : ''}</span>` : ''}
   </header>
   <p class="sc-sum">${esc(pr.summary)}</p>
   ${plate}
+  ${patchNote}
   ${(pr.relatedScenes ?? []).length || pr.carriedBy ? `<p class="variant">${(pr.relatedScenes ?? []).length ? `${esc(t.relatedScenesLabel)}${esc(t.colon)}<b>${esc(pr.relatedScenes.join(t.listSep))}</b>` : ''}${pr.carriedBy ? `${esc(t.pairSep)}${esc(t.carriedByLabel)}${esc(t.colon)}${esc([].concat(pr.carriedBy).join(t.listSep))}` : ''}</p>` : ''}
   <section class="blk">
     <h4>${esc(t.anchorsTitle)}<small>${esc(t.anchorsHint)}</small></h4>
@@ -630,9 +758,28 @@ export function renderHtml(doc, lang = null) {
 
   const cards = scenes
     .map((s) => {
+      const sheetSlot = s.views?.sheet;
+      const curVer = sheetSlot?.versions?.find((x) => x.v === sheetSlot.current);
+      const sheetVersions = sheetSlot?.versions || (s.sheetImage ? [{ v: 1, file: s.sheetImage, model: 'antigravity', createdAt: '' }] : []);
+      const verBadge = curVer ? `<span class="badge" title="当前定稿版本">v${curVer.v}</span>` : '';
+      const versForAttr = sheetVersions.map((x) => ({
+        v: x.v,
+        src: x.file,
+        model: x.model || '',
+        seed: x.seed ?? '',
+        patch: x.patch || '',
+        createdAt: x.createdAt || '',
+        gatesOk: true,
+        gatesText: '',
+        isCurrent: x.v === (curVer ? curVer.v : 1),
+      }));
+      const abBtn = sheetVersions.length > 1
+        ? `<button class="copy mini rp-ab-open" type="button" data-ab-type="art" data-ab-asset="${esc(doc.source ? `${doc.source}-art.json` : 'art.json')}" data-ab-item-id="${esc(s.id)}" data-ab-view="sheet" data-ab-title="${esc(s.id)} · ${esc(s.name)} · 概念设计板" data-ab-current="${curVer ? curVer.v : 1}" data-ab-versions="${esc(JSON.stringify(versForAttr))}">变体(${sheetVersions.length})</button>`
+        : '';
+      const patchNote = curVer?.patch ? `<p class="variant">变体微调：<b>${esc(curVer.patch)}</b></p>` : '';
       const plate = s.sheetImage
         ? `<figure class="plate">
-  <button class="zoom" data-src="${esc(s.sheetImage)}" aria-label="${esc(t.zoomImage)}">
+  <button class="zoom" data-src="${esc(s.sheetImage)}" aria-label="${esc(t.zoomImage)}" data-ab-type="art" data-ab-asset="${esc(doc.source ? `${doc.source}-art.json` : 'art.json')}" data-ab-item-id="${esc(s.id)}" data-ab-view="sheet" data-ab-title="${esc(s.id)} · ${esc(s.name)} · 概念设计板" data-ab-current="${curVer ? curVer.v : 1}" data-ab-versions="${esc(JSON.stringify(versForAttr))}">
     <img src="${esc(s.sheetImage)}" alt="${esc(s.name)} ${esc(t.sheetCaption)}" loading="lazy">
   </button>
   <figcaption>${esc(t.sheetCaption)}</figcaption>
@@ -643,10 +790,12 @@ export function renderHtml(doc, lang = null) {
     <span class="sc-id">${esc(s.id)}</span>
     <h3>${esc(s.name)}</h3>
     <span class="badge${s.primary ? '' : ' once'}">${esc(s.variantOf ? t.variantScene : s.primary ? t.primaryScene : t.onceScene)}</span>
+    ${verBadge}${abBtn}
     ${s.usage?.episodes?.length ? `<span class="sc-use">${esc(t.usageTitle)} ${esc(s.usage.episodes.join(t.listSep))}${s.usage.beats?.length ? `${esc(t.pairSep)}${esc(t.beatsTitle)} ${esc(s.usage.beats.join(' · '))}` : ''}</span>` : ''}
   </header>
   <p class="sc-sum">${esc(s.summary)}</p>
   ${plate}
+  ${patchNote}
   ${s.variantOf ? `<p class="variant">${esc(t.variantTitle)}${esc(t.colon)}<b>${esc(s.variantOf)}</b>${esc(t.pairSep)}${esc(t.variantChanges)}${esc(t.colon)}${esc(s.changes)}</p>` : ''}
   <section class="blk">
     <h4>${esc(t.anchorsTitle)}<small>${esc(t.anchorsHint)}</small></h4>
@@ -938,6 +1087,11 @@ const USAGE = `novel-art.mjs — novel-art skill 的确定性工具（场景 + �
   validate <art.json> [--cast c.json]    校验；有违规逐条打印并 exit 1
                                          给了 cast.json 才查「提示词不含角色名」
   checkup <art.json> [--cast c.json]     只打印质量门 ✓/✗，有未过项 exit 1
+  prompt <art.json> <id|name> [视图]     预览场景/道具出图提示词（支持 --patch）
+  gen <art.json> <id|name> [视图]        生成指定场景或道具视图并记录版本
+        [--model m] [--patch "..."]      可传模型名、微调描述
+  versions <art.json> [id|name] [视图]   查看场景/道具出图版本清单（* 标示当前定稿）
+  select <art.json> <id|name> <视图> <v> 切换当前定稿版本（支持 v1 或 1）
   render <art.json> [--html|--md]        渲染报告到 stdout（默认 --md）
         [--lang zh|en]                   界面语言优先级：--lang > art.json 顶层 lang 字段 > 中文
         [--images <dir>]                 设定图所在目录，任意路径（相对当前目录解析）；
@@ -954,7 +1108,20 @@ function flag(rest, name, fallback = null) {
   return i >= 0 && rest[i + 1] ? rest[i + 1] : fallback;
 }
 
-function main(argv) {
+function posArgs(arr) {
+  const flagsWithVal = new Set(['--cast', '--lang', '--images', '--model', '--patch', '--seed', '--version']);
+  const out = [];
+  for (let i = 0; i < arr.length; i++) {
+    if (arr[i].startsWith('--')) {
+      if (flagsWithVal.has(arr[i])) i++;
+      continue;
+    }
+    out.push(arr[i]);
+  }
+  return out;
+}
+
+async function main(argv) {
   const [cmd, ...rest] = argv;
 
   if (!cmd || cmd === '-h' || cmd === '--help') {
@@ -996,6 +1163,116 @@ function main(argv) {
     return;
   }
 
+  if (cmd === 'prompt') {
+    const [path, itemId, viewArg] = posArgs(rest);
+    if (!path || !itemId) throw new Error('用法：prompt <art.json> <id|name|slug> [视图] [--patch "..."]');
+    const doc = readJson(path);
+    const item = findItem(doc, itemId);
+    if (!item) throw new Error(`未找到场景或道具：${itemId}`);
+    const view = viewArg || 'sheet';
+    const patch = flag(rest, '--patch');
+    const pr = buildItemPrompt(item, view, patch);
+    console.log(JSON.stringify({ id: item.id, name: item.name, ...pr }, null, 2));
+    return;
+  }
+
+  if (cmd === 'versions') {
+    const [path, itemId, viewArg] = posArgs(rest);
+    if (!path) throw new Error('用法：versions <art.json> [id|name|slug] [视图]');
+    const doc = readJson(path);
+    const items = itemId ? [findItem(doc, itemId)] : [...(doc.scenes ?? []), ...(doc.props ?? [])];
+    if (itemId && !items[0]) throw new Error(`未找到场景或道具：${itemId}`);
+    let count = 0;
+    for (const item of items) {
+      if (!item) continue;
+      const viewsToShow = viewArg ? [viewArg] : Object.keys(item.views ?? {});
+      for (const vId of viewsToShow) {
+        const slot = item.views?.[vId];
+        if (!slot || !slot.versions?.length) continue;
+        count++;
+        console.log(`\n${item.id} ${item.name} · ${vId}（当前定稿：v${slot.current}）：`);
+        for (const ver of slot.versions) {
+          const isCur = ver.v === slot.current;
+          const mark = isCur ? '*' : ' ';
+          const dateStr = ver.createdAt ? ver.createdAt.slice(0, 10) : '';
+          const patchInfo = ver.patch ? `  变体微调：${ver.patch}` : '';
+          console.log(`  ${mark} v${ver.v}  ${ver.model || 'model'}  ${dateStr}  ${ver.file}${patchInfo}`);
+        }
+      }
+    }
+    if (!count) console.log(itemId ? `${itemId} 暂无出图版本记录。` : '暂无任何出图版本记录。');
+    else console.log('\n* 标示当前定稿。切换定稿：select <art.json> <id> <视图> <v>');
+    return;
+  }
+
+  if (cmd === 'select') {
+    const [path, itemId, view, vArg] = posArgs(rest);
+    const vOpt = flag(rest, '--version') || vArg;
+    if (!path || !itemId || !view || !vOpt) throw new Error('用法：select <art.json> <id|name|slug> <视图> <--version v | v编号>');
+    const doc = readJson(path);
+    const item = findItem(doc, itemId);
+    if (!item) throw new Error(`未找到场景或道具：${itemId}`);
+    const found = selectVersion(doc, item, view, vOpt);
+    writeFileSync(resolve(path), JSON.stringify(doc, null, 2) + '\n', 'utf8');
+    console.log(`✓ 已将 ${item.name}（${item.id}）${view} 当前定稿版本设为 v${found.v}（${found.file}）`);
+    if (found.patch) console.log(`  变体修饰：${found.patch}`);
+    return;
+  }
+
+  if (cmd === 'gen') {
+    const [path, itemId, viewArg] = posArgs(rest);
+    if (!path || !itemId) throw new Error('用法：gen <art.json> <id|name|slug> [视图] [--model m] [--patch "..."] [--images <dir>]');
+    const doc = readJson(path);
+    const item = findItem(doc, itemId);
+    if (!item) throw new Error(`未找到场景或道具：${itemId}`);
+    const view = viewArg || 'sheet';
+    const patch = flag(rest, '--patch');
+    const pr = buildItemPrompt(item, view, patch);
+    const outDir = dirname(resolve(path));
+    const imagesFlag = flag(rest, '--images');
+    const imagesDir = imagesFlag ? resolve(imagesFlag) : join(outDir, 'images');
+    mkdirSync(imagesDir, { recursive: true });
+
+    const cfg = loadConfig();
+    const model = flag(rest, '--model') || cfg.deriveModel || cfg.anchorModel || 'gemini-3.1-flash-image';
+    const seed = flag(rest, '--seed');
+    console.log(`正在为 ${item.name}（${item.id}）生成 ${view}（模型：${model}）...`);
+    const t0 = Date.now();
+    const buf = await generate(
+      model,
+      {
+        text: pr.text,
+        negative: pr.negative,
+        ratio: pr.ratio,
+        refs: [],
+        seed: seed ? Number(seed) : null,
+      },
+      cfg,
+    );
+
+    const slot = (item.views ??= {})[view] ?? { versions: [] };
+    const nextV = Math.max(0, ...slot.versions.map((x) => x.v)) + 1;
+    const relFile = `images/${slug(item.name)}-${view}.v${nextV}.png`;
+    const absFile = join(outDir, relFile);
+    writeFileSync(absFile, buf);
+
+    if (view === 'sheet') {
+      writeFileSync(join(imagesDir, `${slug(item.name)}-sheet.png`), buf);
+    }
+
+    const { version } = recordVersion(doc, item, view, {
+      buf,
+      file: relFile,
+      model,
+      prompt: pr,
+      patch,
+    });
+    writeFileSync(resolve(path), JSON.stringify(doc, null, 2) + '\n', 'utf8');
+    console.log(`✓ 已生成 ${item.name}（${item.id}）${view} v${version.v}（${relFile}，${Math.round((Date.now() - t0) / 1000)}s）`);
+    if (patch) console.log(`  变体修饰：${patch}`);
+    return;
+  }
+
   if (cmd === 'render') {
     const [path] = rest;
     if (!path) throw new Error('用法：render <art.json> [--html|--md] [--lang zh|en] [--images <dir>]');
@@ -1008,8 +1285,19 @@ function main(argv) {
     const imagesFlag = flag(rest, '--images');
     const imagesDir = imagesFlag ? resolve(imagesFlag) : join(outDir, 'images');
     for (const item of [...doc.scenes, ...(doc.props ?? [])]) {
-      const abs = join(imagesDir, `${slug(item.name)}-sheet.png`);
-      if (existsSync(abs)) item.sheetImage = relative(outDir, abs).split(sep).join('/');
+      let matchedFile = null;
+      if (item.views?.sheet?.current) {
+        const curV = item.views.sheet.current;
+        const ver = item.views.sheet.versions?.find((x) => x.v === curV);
+        if (ver?.file && existsSync(resolve(outDir, ver.file))) {
+          matchedFile = ver.file;
+        }
+      }
+      if (!matchedFile) {
+        const abs = join(imagesDir, `${slug(item.name)}-sheet.png`);
+        if (existsSync(abs)) matchedFile = relative(outDir, abs).split(sep).join('/');
+      }
+      if (matchedFile) item.sheetImage = matchedFile;
     }
     process.stdout.write((rest.includes('--html') ? renderHtml(doc, lang) : renderMarkdown(doc, lang)) + '\n');
     return;
@@ -1040,10 +1328,8 @@ if (isMainModule()) {
     if (e.code === 'EPIPE') process.exit(0);
     throw e;
   });
-  try {
-    main(process.argv.slice(2));
-  } catch (error) {
+  main(process.argv.slice(2)).catch((error) => {
     console.error(error instanceof Error ? error.message : error);
     process.exit(1);
-  }
+  });
 }

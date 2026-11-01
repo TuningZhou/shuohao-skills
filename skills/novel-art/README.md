@@ -81,7 +81,7 @@ node scripts/novel-art.mjs render art.json --html --lang en  # 英文界面报�
 SKILL.md                 给 agent 读的工作流
 scripts/
   novel-art.mjs          seed / validate / checkup / render / slug
-  selftest.mjs           151 项断言，不调模型
+  selftest.mjs           189 项断言，不调模型
 references/
   schema.md              art.json 结构 + 硬规则
   scene-pass.md          怎么填场景设定（AI 短剧的思路）
@@ -100,6 +100,6 @@ assets/
 node scripts/selftest.mjs
 ```
 
-151 项断言，覆盖 seed / 10 道门逐项击穿 / 渲染（中英界面）/ 导出。不调模型、不花额度、1 秒跑完。改完脚本先跑这个。
+189 项断言，覆盖 seed / 10 道门逐项击穿 / 场景与道具资产化版本管理 / 渲染（中英界面）/ 导出。不调模型、不花额度、1 秒跑完。改完脚本先跑这个。
 
 **只在 macOS + Node 24 上实测过。** 代码没有平台相关调用，Linux 和更低版本 Node 理论上没问题，但**没验过**。

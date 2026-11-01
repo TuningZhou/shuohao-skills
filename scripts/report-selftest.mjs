@@ -130,6 +130,13 @@ const DOC = `<!doctype html><html lang="zh"><head><meta charset="utf-8">
   ok(h.includes('href="https://x.com/#frag"'), '外链不动');
 }
 
+{
+  const h = scopeHtml('<div id="p1" data-ab-item-id="S01" data-for="test"></div>', 'art--');
+  ok(h.includes('id="art--p1"'), '标准 id 加前缀');
+  ok(h.includes('data-ab-item-id="S01"'), 'data-*-id 不会被误伤加前缀');
+  ok(h.includes('data-for="test"'), 'data-for 不会被误伤加前缀');
+}
+
 /* ---------------- rebaseAssets ---------------- */
 
 {
@@ -152,6 +159,12 @@ const DOC = `<!doctype html><html lang="zh"><head><meta charset="utf-8">
   const b = rebaseAssets('<img data-src="E01-01/f1.png" data-img="E01-01/f1.png" loading="lazy">', '/demo/storyboard', '/demo');
   eq((b.match(/storyboard\/E01-01\/f1\.png/g) ?? []).length, 2, 'data-src 与 data-img 都重算');
   ok(b.includes('loading="eager"'), 'loading="lazy" 转换为 loading="eager"，保障隐藏 tab 切换瞬显');
+}
+{
+  const b = rebaseAssets('<div data-ab-asset="asset.json" data-ab-versions="[{&quot;v&quot;:1,&quot;src&quot;:&quot;default/face.v1.png&quot;},{&quot;v&quot;:2,&quot;src&quot;:&quot;default/face.v2.png&quot;}]"></div>', '/demo/refs/hero', '/demo');
+  ok(b.includes('data-ab-asset="refs/hero/asset.json"'), 'data-ab-asset 按输出位置重算');
+  ok(b.includes('refs/hero/default/face.v1.png'), 'data-ab-versions 内第一版的 src 按输出位置重算');
+  ok(b.includes('refs/hero/default/face.v2.png'), 'data-ab-versions 内第二版的 src 按输出位置重算');
 }
 
 /* ---------------- scopeJs ---------------- */
@@ -257,6 +270,32 @@ const DOC = `<!doctype html><html lang="zh"><head><meta charset="utf-8">
   ok(!/<link\b/i.test(html), '没有外链样式表');
   ok(!/<script[^>]+\bsrc=/i.test(html), '没有外链脚本');
   ok(!/https?:\/\/(?!x\.com)/.test(html.replace(/https:\/\/json-schema\.org[^"']*/g, '')), '没有外部请求');
+}
+
+{
+  // 变体评审工作台与 A/B 对比
+  const p = makePane(DOC, { id: 'refs' });
+  p.meta = PANES.find((x) => x.id === 'refs');
+  const html = renderShell([p], { title: '渡口', lang: 'zh' });
+  ok(html.includes('id="rp-ab-modal"'), '外壳包含变体评审弹层容器');
+  ok(html.includes('id="rp-ab-track"'), '包含历史候选版本缩略图胶卷轨道');
+  ok(html.includes('id="rp-ab-view-split"'), '包含双图并排对比视图');
+  ok(html.includes('id="rp-ab-view-slider"'), '包含划卷滑块对比视图');
+  ok(html.includes('id="rp-ab-copycmd"'), '包含定稿 CLI 命令复制按钮');
+  ok(html.includes('id="rp-ab-btn-a"') && html.includes('id="rp-ab-btn-b"'), '包含设为定稿按钮');
+  ok(html.includes('rp-ab-pill'), '包含微调版本角标样式');
+}
+
+{
+  // 英文界面文案
+  const p = makePane(DOC, { id: 'refs' });
+  p.meta = PANES.find((x) => x.id === 'refs');
+  const en = renderShell([p], { title: 'Ferry', lang: 'en' });
+  ok(en.includes('Asset Variant Comparison'), '英文界面变体弹层标题');
+  ok(en.includes('Side-by-Side'), '英文双图并排按钮');
+  ok(en.includes('Split Slider'), '英文滑块划卷按钮');
+  ok(en.includes('Historical Candidates Filmstrip'), '英文胶卷栏标题');
+  ok(en.includes('Lock Selection CLI'), '英文定稿命令标签');
 }
 
 console.log(`✓ ${passed} 项自测全部通过`);
